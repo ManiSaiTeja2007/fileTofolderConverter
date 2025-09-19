@@ -1,0 +1,11 @@
+venv/
+.mypycache/
+__pycache__/
+.mypy_cache/
+.pytest_cache/
+
+
+output_folder/
+output_folder.zip
+workspace/
+.vscode/           
