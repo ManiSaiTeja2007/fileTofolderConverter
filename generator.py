@@ -755,7 +755,7 @@ def main():
 
     # Phase 2 (generator_extras)
     parser.add_argument("--interactive", action="store_true", help="Prompt user when conflicts occur")
-    parser.add_argument("--html-report", metavar="FILE", help="Write HTML interactive report")
+    parser.add_argument("--html-report", metavar="FILE", nargs="?", const="report.html", default=None, help="Write HTML interactive report (default if used without filename: %(const)s)")    
     parser.add_argument("--incremental", action="store_true", help="Only regenerate changed files")
     parser.add_argument("--set-exec", action="store_true", help="Set executable flag on *.sh and Procfile/Makefile")
     parser.add_argument("--export-md", metavar="FILE", help="Export generated project back into Markdown")
@@ -925,8 +925,18 @@ def main():
         # Replace ambiguous resolution logic with gx.resolve_conflict_interactive inside map_headings_to_files
         logging.info("ℹ️ Interactive conflict resolution enabled")
 
+    if args.html_report:
+        args.html_report = Path(args.output) / Path(args.html_report).name
+
+    if args.export_md:
+        args.export_md = Path(args.output) / Path(args.export_md).name
+
+    if args.extension_report:
+        args.extension_report = Path(args.output) / Path(args.extension_report).name
+        
     if gx and args.html_report:
         gx.write_html_report(tree_entries, out_root, summary, Path(args.html_report))
+
 
     if args.incremental:
         cache_file = out_root / ".generator_cache.json"
