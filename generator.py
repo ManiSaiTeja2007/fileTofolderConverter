@@ -29,7 +29,6 @@ import time
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-
 from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
@@ -728,60 +727,67 @@ def main():
     parser = argparse.ArgumentParser(description="Generate project folder from Markdown spec")
     parser.add_argument("input", help="Markdown file path")
     parser.add_argument("-o", "--output", default="output_folder", help="Output folder (default: output_folder)")
+
+    # Core flags
     parser.add_argument("--strict", action="store_true", help="Abort on errors")
     parser.add_argument("--dry", action="store_true", help="Dry run (no writing)")
     parser.add_argument("--preview", action="store_true", help="Preview planned tree and assignments (no writing)")
     parser.add_argument("--verbose", action="store_true", help="Verbose logging")
     parser.add_argument("-q", "--quiet", action="store_true", help="Quiet (errors only)")
     parser.add_argument("--debug", action="store_true", help="Debug logging")
+
+    # File creation
     parser.add_argument("--skip-empty", action="store_true", help="Do not create placeholder-only files")
+    parser.add_argument("--no-overwrite", action="store_true", help="Do not overwrite existing files")
+
+    # Config & overrides
     parser.add_argument("--json-summary", metavar="FILE", help="Write JSON summary to FILE")
     parser.add_argument("--ignore", nargs="*", default=[], help="Glob patterns to ignore (e.g. '*.md')")
     parser.add_argument("--files-always", nargs="*", default=[], help="Names to always treat as files")
     parser.add_argument("--dirs-always", nargs="*", default=[], help="Names to always treat as dirs")
-    parser.add_argument("--extension-report", metavar="FILE", help="Write audit report (default: report.md in output)")
+    parser.add_argument("--placeholders", metavar="FILE", help="JSON file with placeholder overrides")
+    parser.add_argument("--config", metavar="FILE", help="Path to generator.config.json to load defaults")
+
+    # Advanced features
     parser.add_argument("--strip-hints", action="store_true", help="Strip first-line hint comments from rescued content")
     parser.add_argument("--zip", action="store_true", help="Zip the output folder after generation")
     parser.add_argument("--tar", action="store_true", help="Tar.gz the output folder after generation")
-    parser.add_argument("--placeholders", metavar="FILE", help="JSON file with placeholder overrides")
-    parser.add_argument("--no-overwrite", action="store_true", help="Do not overwrite existing files")
-    parser.add_argument("--config", metavar="FILE", help="Path to generator.config.json to load defaults")
+
+    # Phase 2 (generator_extras)
+    parser.add_argument("--interactive", action="store_true", help="Prompt user when conflicts occur")
+    parser.add_argument("--html-report", metavar="FILE", help="Write HTML interactive report")
+    parser.add_argument("--incremental", action="store_true", help="Only regenerate changed files")
+    parser.add_argument("--set-exec", action="store_true", help="Set executable flag on *.sh and Procfile/Makefile")
+    parser.add_argument("--export-md", metavar="FILE", help="Export generated project back into Markdown")
+    parser.add_argument("--extension-report", metavar="FILE",help="Custom report file (default: report.md)")
+
     args = parser.parse_args()
 
-    # load config file and merge defaults (CLI overrides config)
+    # -------------------------
+    # Load config & merge
+    # -------------------------
     cfg = load_config_file(args.config)
-    # apply config defaults if CLI not provided (we check for each arg)
-    # Basic approach: for each known option, if arg is default or falsy, take from config
-    # We'll allow config to include keys: output, skip_empty, ignore, files_always, dirs_always, strip_hints, zip, tar, placeholders, no_overwrite
-    def take_default(name, current, expect_type=None):
-        if expect_type == bool:
-            return bool(current) if name not in cfg else bool(cfg[name])
-        if current:
+
+    def merge_flag(name, current, expected_type=None):
+        if current not in (None, [], False, "output_folder"):
             return current
         if name in cfg:
             return cfg[name]
         return current
 
-    # Merge some args from config when user hasn't provided
-    args.output = take_default("output", args.output, expect_type=None)
-    if not args.ignore and "ignore" in cfg:
-        args.ignore = cfg.get("ignore", [])
-    if not args.files_always and "files_always" in cfg:
-        args.files_always = cfg.get("files_always", [])
-    if not args.dirs_always and "dirs_always" in cfg:
-        args.dirs_always = cfg.get("dirs_always", [])
-    if not args.placeholders and "placeholders" in cfg:
-        args.placeholders = cfg.get("placeholders")
-    if not args.strip_hints and cfg.get("strip_hints"):
-        args.strip_hints = bool(cfg.get("strip_hints"))
-    if not args.zip and cfg.get("zip"):
-        args.zip = bool(cfg.get("zip"))
-    if not args.tar and cfg.get("tar"):
-        args.tar = bool(cfg.get("tar"))
-    if not args.no_overwrite and cfg.get("no_overwrite"):
-        args.no_overwrite = bool(cfg.get("no_overwrite"))
+    args.output = merge_flag("output", args.output)
+    args.ignore = merge_flag("ignore", args.ignore)
+    args.files_always = merge_flag("files_always", args.files_always)
+    args.dirs_always = merge_flag("dirs_always", args.dirs_always)
+    args.placeholders = merge_flag("placeholders", args.placeholders)
+    args.strip_hints = merge_flag("strip_hints", args.strip_hints, bool)
+    args.zip = merge_flag("zip", args.zip, bool)
+    args.tar = merge_flag("tar", args.tar, bool)
+    args.no_overwrite = merge_flag("no_overwrite", args.no_overwrite, bool)
 
-    # logging
+    # -------------------------
+    # Logging setup
+    # -------------------------
     if args.debug:
         level = logging.DEBUG
     elif args.quiet:
@@ -790,9 +796,14 @@ def main():
         level = logging.INFO
     logging.basicConfig(level=level, format="%(message)s")
 
-    # placeholders merging
+    # -------------------------
+    # Placeholders merging
+    # -------------------------
     merge_placeholders_from_file(args.placeholders)
 
+    # -------------------------
+    # Load input markdown
+    # -------------------------
     start = time.time()
     in_path = Path(args.input)
     if not in_path.exists():
@@ -808,22 +819,18 @@ def main():
     files_always = set(args.files_always)
     dirs_always = set(args.dirs_always)
 
-    # parse tree
     tree_entries = parse_ascii_tree_block(fs_block, files_always, dirs_always)
-
-    # map headings -> files (captures paragraphs + fenced blocks)
     code_map, unassigned, mapping_warnings = map_headings_to_files(
         tokens, tree_entries, files_always, dirs_always, strip_hints=args.strip_hints
     )
-
-    # final rescue pass for remaining unassigned using first-line hints
     unassigned, rescue_warnings = try_rescue_unassigned(unassigned, tree_entries, code_map, strip_hints=args.strip_hints)
 
-    all_warnings: List[str] = mapping_warnings[:]
-    all_warnings.extend(rescue_warnings)
-    errors: List[str] = []
+    all_warnings = mapping_warnings + rescue_warnings
+    errors = []
 
-    # if preview requested, show planned assignments and exit
+    # -------------------------
+    # Preview mode
+    # -------------------------
     if args.preview:
         print("\n---- Preview: Planned file assignments ----\n")
         for f in tree_entries:
@@ -834,54 +841,35 @@ def main():
             else:
                 print(f"{f}/")
         if unassigned:
-            print("\nUnassigned code blocks:", len(unassigned))
-            for i, u in enumerate(unassigned, 1):
-                first = u.splitlines()[0] if u else ""
-                print(f"  [{i}] first-line: {first[:80]}")
+            print(f"\nUnassigned blocks: {len(unassigned)}")
         else:
             print("\nNo unassigned blocks.")
-        print("\n---- End preview ----\n")
-        # write a small JSON summary if requested
         if args.json_summary:
-            preview_summary = {
-                "files_in_tree": len([f for f in tree_entries if is_probably_file(Path(f).name, files_always, dirs_always)]),
-                "unassigned_blocks": len(unassigned),
-            }
-            try:
-                with open(args.json_summary, "w", encoding="utf-8") as jf:
-                    json.dump(preview_summary, jf, indent=2)
-                logging.info(f"ℹ️ Preview summary written to {args.json_summary}")
-            except Exception as e:
-                logging.warning(f"⚠️ Could not write json summary: {e}")
+            with open(args.json_summary, "w", encoding="utf-8") as jf:
+                json.dump({"files_in_tree": len([f for f in tree_entries if is_probably_file(Path(f).name, files_always, dirs_always)]),
+                           "unassigned_blocks": len(unassigned)}, jf, indent=2)
         return
 
-    # prepare output
+    # -------------------------
+    # Prepare output
+    # -------------------------
     out_root = Path(args.output)
-    # remove only if exists and not dry; respect no_overwrite flag by not deleting existing folder
     if out_root.exists() and not args.dry and not args.no_overwrite:
         shutil.rmtree(out_root)
 
     created_dirs, created_files, write_warnings, total_lines_written, placeholders_created, files_written_count = reconcile_and_write(
-        tree_entries,
-        code_map,
-        out_root,
-        dry_run=args.dry,
-        verbose=args.verbose,
-        skip_empty=args.skip_empty,
-        ignore_patterns=args.ignore,
-        files_always=files_always,
-        dirs_always=dirs_always,
-        no_overwrite=args.no_overwrite,
+        tree_entries, code_map, out_root,
+        dry_run=args.dry, verbose=args.verbose, skip_empty=args.skip_empty,
+        ignore_patterns=args.ignore, files_always=files_always, dirs_always=dirs_always,
+        no_overwrite=args.no_overwrite
     )
 
-    # write unassigned files into UNASSIGNED/
     if unassigned and not args.dry:
         un_dir = out_root / "UNASSIGNED"
         un_dir.mkdir(parents=True, exist_ok=True)
         for i, block in enumerate(unassigned, 1):
             (un_dir / f"unassigned_{i}.txt").write_text(block, encoding="utf-8")
 
-    # verification
     verify_output(out_root, tree_entries, code_map, write_warnings)
 
     elapsed = time.time() - start
@@ -896,66 +884,75 @@ def main():
         "files_written_count": files_written_count,
     }
 
-    # json summary
+    # -------------------------
+    # Reports
+    # -------------------------
     if args.json_summary:
-        try:
-            with open(args.json_summary, "w", encoding="utf-8") as jf:
-                json.dump(summary, jf, indent=2)
-            logging.info(f"ℹ️ JSON summary written to {args.json_summary}")
-        except Exception as e:
-            logging.warning(f"⚠️ Could not write json summary: {e}")
+        with open(args.json_summary, "w", encoding="utf-8") as jf:
+            json.dump(summary, jf, indent=2)
 
-    # write report
     report_path = Path(args.extension_report) if args.extension_report else (out_root / "report.md")
-    try:
-        write_extension_report(out_root, tree_entries, code_map, unassigned, write_warnings + all_warnings, errors, report_path, summary, elapsed, rescue_warnings)
-        logging.info(f"ℹ️ Report written to {report_path}")
-    except Exception as e:
-        logging.warning(f"⚠️ Could not write report: {e}")
+    write_extension_report(out_root, tree_entries, code_map, unassigned,
+                           write_warnings + all_warnings, errors, report_path,
+                           summary, elapsed, rescue_warnings)
 
-    # populate project's README.md with non-file sections
     project_readme = extract_project_readme(tokens, tree_entries)
     if project_readme and not args.dry:
         project_readme_path = out_root / "README.md"
-        mode = "a" if project_readme_path.exists() else "w"
-        with open(project_readme_path, mode, encoding="utf-8") as f:
+        with open(project_readme_path, "a" if project_readme_path.exists() else "w", encoding="utf-8") as f:
             f.write("\n\n" + project_readme)
 
-    # archive outputs if requested and not dry
+    # -------------------------
+    # Archives
+    # -------------------------
     if args.zip and not args.dry:
-        try:
-            archive_path = shutil.make_archive(str(out_root), "zip", root_dir=out_root)
-            logging.info(f"📦 Zipped project folder at {archive_path}")
-        except Exception as e:
-            logging.warning(f"⚠️ Failed to zip output folder: {e}")
+        shutil.make_archive(str(out_root), "zip", root_dir=out_root)
     if args.tar and not args.dry:
-        try:
-            tar_path = str(out_root) + ".tar.gz"
-            with tarfile.open(tar_path, "w:gz") as tar:
-                tar.add(out_root, arcname=out_root.name)
-            logging.info(f"📦 Tar.gz project folder at {tar_path}")
-        except Exception as e:
-            logging.warning(f"⚠️ Failed to tar.gz output folder: {e}")
+        import tarfile
+        with tarfile.open(str(out_root) + ".tar.gz", "w:gz") as tar:
+            tar.add(out_root, arcname=out_root.name)
 
-    # final console output
+    # -------------------------
+    # Phase 2 delegation
+    # -------------------------
+    try:
+        import extras.generator_extras as gx
+    except ImportError:
+        gx = None
+
+
+    if args.interactive:
+        # Replace ambiguous resolution logic with gx.resolve_conflict_interactive inside map_headings_to_files
+        logging.info("ℹ️ Interactive conflict resolution enabled")
+
+    if gx and args.html_report:
+        gx.write_html_report(tree_entries, out_root, summary, Path(args.html_report))
+
+    if args.incremental:
+        cache_file = out_root / ".generator_cache.json"
+        cache = gx.load_cache(cache_file)
+        gx.save_cache(cache_file, cache)
+
+    if args.set_exec:
+        for f in created_files:
+            if f.endswith(".sh") or Path(f).name in ("Procfile", "Makefile"):
+                gx.set_executable(Path(f))
+
+    if args.export_md:
+        gx.export_to_markdown(out_root, Path(args.export_md))
+
+    # -------------------------
+    # Final console summary
+    # -------------------------
     if level <= logging.INFO:
         logging.info("\n---- Final Report ----")
-        logging.info(f"📄 Files in tree: {summary['files_in_tree']}")
-        logging.info(f"📄 Files created (expected): {summary['files_created']}")
-        logging.info(f"📁 Dirs created: {summary['dirs_created']}")
-        logging.info(f"📚 Lines written (approx): {summary['lines_written']}")
-        logging.info(f"🧾 Placeholder-only files: {summary['placeholders_created']}")
-        if summary["issues"]:
-            logging.warning("\n⚠️ Issues:")
-            for w in summary["issues"]:
-                logging.warning(" - " + w)
-        else:
-            logging.info("✅ All files created and verified successfully")
+        for k, v in summary.items():
+            logging.info(f"{k}: {v}")
         if summary["unassigned_blocks"]:
-            logging.warning(f"⚠️ {summary['unassigned_blocks']} unassigned code block(s) saved in UNASSIGNED/")
+            logging.warning(f"⚠️ {summary['unassigned_blocks']} unassigned block(s) saved in UNASSIGNED/")
+        elif not summary["issues"]:
+            logging.info("✅ All files created and verified successfully")
 
-    # done
-    return
 
 
 if __name__ == "__main__":
