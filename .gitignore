@@ -4,6 +4,7 @@ __pycache__/
 .mypy_cache/
 .pytest_cache/
 tests/
+pytest_results.xml
 
 
 output_folder/
