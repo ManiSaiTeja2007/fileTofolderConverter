@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
 """
 generator.py
-Markdown → Project folder generator (updated)
+Markdown → Project folder generator (Phase 1)
 
-Features/highlights in this version:
-- Maps headings -> files, captures fenced code + paragraphs for files
-- Recognizes fenced info strings like ```dockerfile```, ```firestore.rules```
-- Uses first-line hint comments (// path/to/file or # path/to/file) to reassign blocks
-- Optionally strips those hint lines from written files via --strip-hints
-- Improved SPECIAL_FILES and case-insensitive checks (Dockerfile, firestore.rules, .env, etc.)
-- Skips the 'File Structure' fenced block from mapping
-- Writes report.md (tree + issues + rescued notes + summary + elapsed time)
-- Dumps non-file sections into generated project's README.md
-- Supports flags: --skip-empty, --json-summary, --ignore, --files-always, --dirs-always,
-  --extension-report, --dry, --verbose, --debug, -q, --strip-hints, --zip
+Adds:
+- config file support (generator.config.json)
+- preview mode (--preview)
+- custom placeholders via JSON (--placeholders)
+- safe-overwrite (--no-overwrite)
+- path traversal guard (blocks absolute / .. escaping)
+- additional stats in report/json
+- tar.gz archiving (--tar)
+- preserves previous behaviors: rescue hints, strip-hints, zip
 """
 
 from __future__ import annotations
@@ -21,9 +19,11 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
 import shutil
 import sys
+import tarfile
 import textwrap
 import time
 from fnmatch import fnmatch
@@ -34,9 +34,9 @@ from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
 # -------------------------
-# Placeholders by extension
+# Default placeholders by extension
 # -------------------------
-EXT_COMMENT_PLACEHOLDER = {
+EXT_COMMENT_PLACEHOLDER: Dict[str, str] = {
     ".py": "# TODO: implement\n",
     ".js": "// TODO: implement\n",
     ".ts": "// TODO: implement\n",
@@ -57,23 +57,30 @@ EXT_COMMENT_PLACEHOLDER = {
 # File detection + special cases
 # -------------------------
 SPECIAL_FILES = {
-    "dockerfile", "makefile", "license", "readme", "readme.md",
-    "contributing", "authors", "changelog", ".gitignore",
-    ".eslintrc", ".editorconfig", "firestore.rules", ".env",
-    "tsconfig.json", "package.json", "requirements.txt", "procfile",
-    "docker-compose.yml", "docker-compose.yaml",
+    "dockerfile",
+    "makefile",
+    "license",
+    "readme",
+    "readme.md",
+    "contributing",
+    "authors",
+    "changelog",
+    ".gitignore",
+    ".eslintrc",
+    ".editorconfig",
+    "firestore.rules",
+    ".env",
+    "tsconfig.json",
+    "package.json",
+    "requirements.txt",
+    "procfile",
+    "docker-compose.yml",
+    "docker-compose.yaml",
 }
 
 
 def is_probably_file(name: str, files_always: Optional[set] = None, dirs_always: Optional[set] = None) -> bool:
-    """
-    Decide whether a path segment is a file.
-    - trailing '/' => directory
-    - dirs_always override => directory
-    - files_always or SPECIAL_FILES => file (case-insensitive)
-    - special-case Dockerfile
-    - else if contains '.' => file
-    """
+    """Heuristic to decide whether a segment is a file."""
     if not name:
         return False
     files_always = set(x.lower() for x in (files_always or set()))
@@ -98,20 +105,30 @@ def normalize_path_segment(seg: str) -> str:
 # -------------------------
 # Utilities
 # -------------------------
-def safe_write_text(path: Path, content: str, warnings: List[str]):
-    """Write text safely creating parent directories. Append warnings on errors."""
+def safe_write_text(path: Path, content: str, warnings: List[str], no_overwrite: bool = False) -> bool:
+    """
+    Write text safely creating parent directories.
+    Returns True if file was written, False if skipped or failed.
+    Appends warnings on issues.
+    """
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists() and path.is_dir():
-            warnings.append(f"⚠️ Conflict: Tried to write file but a directory exists at {path}")
-            return
+        if path.exists():
+            if path.is_dir():
+                warnings.append(f"⚠️ Conflict: Tried to write file but a directory exists at {path}")
+                return False
+            if no_overwrite:
+                warnings.append(f"ℹ️ Skipped existing file {path} due to --no-overwrite")
+                return False
         if path.parent.exists() and path.parent.is_file():
             warnings.append(f"⚠️ Invalid structure: Parent is a file for {path}")
-            return
+            return False
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)
+        return True
     except Exception as e:
         warnings.append(f"⚠️ Failed to write {path}: {e}")
+        return False
 
 
 # -------------------------
@@ -125,10 +142,9 @@ def load_markdown(path: Path) -> Tuple[str, List[Token]]:
 
 
 def extract_file_structure_block(md_text: str, tokens: List[Token]) -> Optional[str]:
-    # Prefer scanning tokens for a heading that contains "file structure"
+    # Prefer token scanning
     for i, tok in enumerate(tokens):
         if tok.type == "inline" and "file structure" in tok.content.lower():
-            # the fenced block should be shortly after
             j = i + 1
             while j < len(tokens):
                 if tokens[j].type in ("fence", "code_block"):
@@ -166,15 +182,11 @@ def parse_ascii_tree_block(block_text: str, files_always: set, dirs_always: set)
         if not line:
             continue
 
-        # --- strip inline comment/tags like '#edit', '#new' ---
-        # If the whole line starts with '#', ignore
+        # strip inline comment/tags like '#edit', '#new'
         if line.strip().startswith("#"):
             continue
-        # Remove trailing tags like "filename #edit #todo" -> "filename"
         if " #" in line:
             line = line.split(" #", 1)[0].strip()
-        # Also remove trailing inline comments starting with '//' or '--'
-        # e.g. "file.py // note" -> "file.py"
         if " //" in line:
             line = line.split(" //", 1)[0].strip()
         if " -- " in line:
@@ -189,11 +201,10 @@ def parse_ascii_tree_block(block_text: str, files_always: set, dirs_always: set)
         full = f"{parent}/{line}" if parent else line
         entries.append(full)
 
-        # push as directory if heuristic says so
         if not is_probably_file(line, files_always, dirs_always):
             stack.append((full, indent))
 
-    # Root-folder fix: if the first entry is a directory, ensure others are children
+    # Root-folder fix: if the first entry is directory ensure others are its children
     if entries:
         root = entries[0]
         if not is_probably_file(Path(root).name, files_always, dirs_always):
@@ -211,10 +222,6 @@ def parse_ascii_tree_block(block_text: str, files_always: set, dirs_always: set)
 # Helper: infer target(s) from fence info string
 # -------------------------
 def infer_targets_from_fence_info(info: str, tree_entries: List[str]) -> List[str]:
-    """
-    Use the fence info string (like 'dockerfile', 'firestore.rules', 'python') as hint
-    to find candidate file paths in tree_entries (case-insensitive).
-    """
     if not info:
         return []
     info_clean = info.strip().lower()
@@ -242,16 +249,6 @@ def map_headings_to_files(
     dirs_always: set,
     strip_hints: bool,
 ) -> Tuple[Dict[str, List[str]], List[str], List[str]]:
-    """
-    Walk tokens and:
-    - when a heading matches a file in tree_files, set current_file
-    - capture paragraph text and fence blocks under that heading as file content
-    - if a fence block appears without a mapped heading, attempt to infer target via:
-        1) fence info string (e.g. ```dockerfile```)
-        2) first-line hint comment (// path/to/file or # path/to/file)
-        3) basename matching
-    Returns (code_map, unassigned_blocks, mapping_warnings)
-    """
     code_map: Dict[str, List[str]] = {
         f: [] for f in tree_files if is_probably_file(Path(f).name, files_always, dirs_always)
     }
@@ -270,12 +267,11 @@ def map_headings_to_files(
     while i < n:
         tok = tokens[i]
 
-        # --- heading handling ---
+        # heading handling
         if tok.type == "heading_open":
             inline = tokens[i + 1] if (i + 1) < n else None
             heading_text = inline.content.strip() if inline and inline.type == "inline" else ""
             heading_text_stripped = heading_text.strip()
-            # Skip mapping for the File Structure heading (and skip its fence block)
             if heading_text_stripped.lower() == "file structure":
                 current_file = None
                 skip_next_fence_for_file_structure = True
@@ -291,40 +287,43 @@ def map_headings_to_files(
             i += 1
             continue
 
-        # --- fenced code block handling ---
+        # fence blocks
         if tok.type == "fence":
             fence_info = getattr(tok, "info", "") or ""
             fence_info = fence_info.strip()
             fence_content = textwrap.dedent(tok.content).rstrip()
 
-            # If this fence follows a "File Structure" heading, skip it (that's the ASCII tree)
             if skip_next_fence_for_file_structure:
                 skip_next_fence_for_file_structure = False
                 i += 1
                 continue
 
-            # If we have a current file (heading matched a file), attach to it
             if current_file and current_file in code_map:
                 code_map[current_file].append(fence_content)
                 i += 1
                 continue
 
-            # 1) Try to infer from fence info string
+            # infer via fence info
             candidates = infer_targets_from_fence_info(fence_info, list(code_map.keys()))
+            # prioritize exact basename matches
+            exact = [c for c in candidates if Path(c).name.lower() == fence_info.lower()]
+            if len(exact) == 1:
+                code_map[exact[0]].append(fence_content)
+                warnings.append(f"ℹ️ Assigned fenced block (exact info='{fence_info}') -> {exact[0]}")
+                i += 1
+                continue
             if len(candidates) == 1:
                 code_map[candidates[0]].append(fence_content)
                 warnings.append(f"ℹ️ Assigned fenced block (info='{fence_info}') -> {candidates[0]}")
                 i += 1
                 continue
-            elif len(candidates) > 1:
-                warnings.append(
-                    f"⚠️ Ambiguous fence info '{fence_info}' matches {candidates}; kept unassigned"
-                )
+            if len(candidates) > 1:
+                warnings.append(f"⚠️ Ambiguous fence info '{fence_info}' matches {candidates}; kept unassigned")
                 unassigned.append(fence_content)
                 i += 1
                 continue
 
-            # 2) Try first-line hint inside fenced content (// or #)
+            # try first-line hint inside fence content
             first_line = fence_content.splitlines()[0] if fence_content else ""
             if first_line.strip().startswith("//") or first_line.strip().startswith("#"):
                 hint = re.sub(r"^(\s*//\s*|\s*#\s*)", "", first_line).strip()
@@ -346,9 +345,9 @@ def map_headings_to_files(
                     unassigned.append(fence_content)
                     i += 1
                     continue
-                # else continue to other heuristics
+                # else fallthrough
 
-            # 3) Try basename match of fence_info (e.g., fence_info="Dockerfile")
+            # try basename matching of fence_info
             if fence_info:
                 fence_basename = Path(fence_info).name
                 if fence_basename in basename_lookup and len(basename_lookup[fence_basename]) == 1:
@@ -359,12 +358,12 @@ def map_headings_to_files(
                     i += 1
                     continue
 
-            # None matched -> keep unassigned
+            # fallback: unassigned
             unassigned.append(fence_content)
             i += 1
             continue
 
-        # --- paragraph blocks (map paragraph text under matching heading to files) ---
+        # paragraph blocks
         if tok.type == "paragraph_open":
             inline = tokens[i + 1] if (i + 1) < n else None
             para_text = ""
@@ -380,14 +379,14 @@ def map_headings_to_files(
             i = j + 1
             continue
 
-        # default advance
+        # default
         i += 1
 
     return code_map, unassigned, warnings
 
 
 # -------------------------
-# Rescue pass for remaining unassigned blocks (first-line hints)
+# Rescue pass for remaining unassigned blocks (using first-line hints)
 # -------------------------
 def try_rescue_unassigned(
     unassigned: List[str],
@@ -403,7 +402,16 @@ def try_rescue_unassigned(
         first_line = lines[0] if lines else ""
         if first_line.strip().startswith("//") or first_line.strip().startswith("#"):
             hint_path = re.sub(r"^(\s*//\s*|\s*#\s*)", "", first_line).strip().lstrip("./")
-            candidates = [f for f in tree_entries if f.endswith(hint_path) or hint_path in f]
+            # ranking: exact match of full path > endswith match > contains
+            candidates = []
+            for f in code_map.keys():
+                if f == hint_path:
+                    candidates = [f]
+                    break
+                if f.endswith(hint_path):
+                    candidates.append(f)
+            if not candidates:
+                candidates = [f for f in code_map.keys() if hint_path in f]
             if len(candidates) == 1:
                 target = candidates[0]
                 if strip_hints:
@@ -414,9 +422,7 @@ def try_rescue_unassigned(
                     code_map[target].append(body)
                 rescued_warnings.append(f"ℹ️ Rescued block → assigned to {target} (from hint {hint_path})")
             elif len(candidates) > 1:
-                rescued_warnings.append(
-                    f"⚠️ Ambiguous hint {hint_path} → matches {candidates}, kept unassigned"
-                )
+                rescued_warnings.append(f"⚠️ Ambiguous hint {hint_path} → matches {candidates}, kept unassigned")
                 still_unassigned.append(code)
             else:
                 rescued_warnings.append(f"⚠️ Hint {hint_path} did not match any file, kept unassigned")
@@ -430,10 +436,6 @@ def try_rescue_unassigned(
 # Extract project README content for non-file headings
 # -------------------------
 def extract_project_readme(tokens: List[Token], tree_entries: List[str]) -> str:
-    """
-    Collect heading sections that don't map to files in the tree and return a Markdown string
-    to be appended to the generated project's README.md.
-    """
     file_names = {Path(f).name for f in tree_entries if is_probably_file(Path(f).name)}
     out_sections: List[str] = []
     i = 0
@@ -443,13 +445,11 @@ def extract_project_readme(tokens: List[Token], tree_entries: List[str]) -> str:
         if tok.type == "heading_open":
             inline = tokens[i + 1] if (i + 1) < n else None
             heading_text = inline.content.strip() if inline and inline.type == "inline" else ""
-            # skip file-like headings and the File Structure heading
             if Path(heading_text).name in file_names or heading_text.strip().lower() == "file structure":
                 i += 1
                 continue
             section_lines: List[str] = [f"# {heading_text}" if not heading_text.startswith("#") else heading_text]
             i += 1
-            # gather tokens until next heading_open
             while i < n and tokens[i].type != "heading_open":
                 t = tokens[i]
                 if t.type == "inline":
@@ -462,7 +462,6 @@ def extract_project_readme(tokens: List[Token], tree_entries: List[str]) -> str:
                     inlinep = tokens[i + 1] if (i + 1) < n else None
                     if inlinep and inlinep.type == "inline":
                         section_lines.append(inlinep.content)
-                    # advance to paragraph_close
                     j = i + 1
                     while j < n and tokens[j].type != "paragraph_close":
                         j += 1
@@ -475,8 +474,29 @@ def extract_project_readme(tokens: List[Token], tree_entries: List[str]) -> str:
 
 
 # -------------------------
-# Reconcile & write to disk
+# Reconcile & write to disk (with no-overwrite support and path validation)
 # -------------------------
+def validate_entry_path(entry: str) -> Optional[str]:
+    """
+    Return None if entry looks safe.
+    Otherwise return an error string describing the problem.
+    Rules:
+    - No absolute paths (must not start with '/')
+    - No parent traversal that escapes root ('..' as a segment)
+    - No Windows drive-letter like 'C:\'
+    """
+    if not entry:
+        return "Empty path"
+    if entry.startswith("/") or entry.startswith("\\"):
+        return "Absolute paths are not allowed"
+    if ".." in Path(entry).parts:
+        return "Parent traversal ('..') not allowed"
+    # Windows drive detection
+    if re.match(r"^[A-Za-z]:\\", entry):
+        return "Absolute Windows paths not allowed"
+    return None
+
+
 def reconcile_and_write(
     tree_entries: List[str],
     code_map: Dict[str, List[str]],
@@ -487,7 +507,11 @@ def reconcile_and_write(
     ignore_patterns: Optional[List[str]] = None,
     files_always: Optional[set] = None,
     dirs_always: Optional[set] = None,
-) -> Tuple[set, List[str], List[str]]:
+    no_overwrite: bool = False,
+) -> Tuple[set, List[str], List[str], int, int, int]:
+    """
+    Returns (created_dirs, created_files, warnings, total_lines_written, placeholders_created, files_written_count)
+    """
     created_files: List[str] = []
     created_dirs: set = set()
     warnings: List[str] = []
@@ -495,14 +519,24 @@ def reconcile_and_write(
     files_always = files_always or set()
     dirs_always = dirs_always or set()
 
+    total_lines_written = 0
+    placeholders_created = 0
+    files_written_count = 0
+
     for entry in tree_entries:
         entry_clean = normalize_path_segment(entry)
         if not entry_clean:
+            continue
+        # validate path safety
+        err = validate_entry_path(entry_clean)
+        if err:
+            warnings.append(f"❌ Unsafe path '{entry_clean}': {err}")
             continue
         if any(fnmatch(entry_clean, pat) for pat in ignore_patterns):
             continue
         parts = entry_clean.split("/")
         name = parts[-1]
+        # directory or file?
         if is_probably_file(name, files_always, dirs_always):
             path = out_root.joinpath(*parts)
             content_parts = code_map.get(entry_clean, [])
@@ -511,13 +545,20 @@ def reconcile_and_write(
             else:
                 ext = "." + name.split(".")[-1] if "." in name else ""
                 content = EXT_COMMENT_PLACEHOLDER.get(ext, EXT_COMMENT_PLACEHOLDER["default"])
+                placeholders_created += 1
             if skip_empty and (not content_parts):
                 warnings.append(f"ℹ️ Skipped placeholder file {entry_clean} due to --skip-empty")
                 continue
             if verbose:
                 logging.debug(f"[write] {path}")
             if not dry_run:
-                safe_write_text(path, content, warnings)
+                written = safe_write_text(path, content, warnings, no_overwrite=no_overwrite)
+                if written:
+                    files_written_count += 1
+                    total_lines_written += content.count("\n") + (1 if content and not content.endswith("\n") else 0)
+            else:
+                # preview: count lines heuristically
+                total_lines_written += content.count("\n") + (1 if content and not content.endswith("\n") else 0)
             created_files.append(str(path))
         else:
             path = out_root.joinpath(*parts)
@@ -527,7 +568,7 @@ def reconcile_and_write(
                 except Exception as e:
                     warnings.append(f"⚠️ Failed to create dir {path}: {e}")
             created_dirs.add(str(path))
-    return created_dirs, created_files, warnings
+    return created_dirs, created_files, warnings, total_lines_written, placeholders_created, files_written_count
 
 
 # -------------------------
@@ -542,7 +583,10 @@ def verify_output(out_root: Path, tree_files: List[str], code_map: Dict[str, Lis
         if not path.exists():
             warnings.append(f"❌ Missing file: {f}")
         else:
-            size = path.stat().st_size
+            try:
+                size = path.stat().st_size
+            except Exception:
+                size = 0
             if size == 0:
                 warnings.append(f"⚠️ Empty file: {f}")
             if len(code_map.get(f, [])) > 1:
@@ -550,7 +594,7 @@ def verify_output(out_root: Path, tree_files: List[str], code_map: Dict[str, Lis
 
 
 # -------------------------
-# Report writer
+# Report writer (adds stats)
 # -------------------------
 def write_extension_report(
     out_root: Path,
@@ -591,7 +635,6 @@ def write_extension_report(
                 else:
                     lines.append(f"{prefix}{name} ✅")
     lines.append("```")
-
     if errors or warnings or rescued_warnings:
         lines.append("\n## Issues")
         if errors:
@@ -622,8 +665,60 @@ def write_extension_report(
     lines.append(f"- Unassigned blocks: {summary.get('unassigned_blocks', 0)}")
     lines.append(f"- Issues: {len(warnings) + len(errors)}")
     lines.append(f"- Time taken: {elapsed:.2f}s")
+    lines.append(f"- Lines written (approx): {summary.get('lines_written', 0)}")
+    lines.append(f"- Placeholder-only files: {summary.get('placeholders_created', 0)}")
     lines.append("")
     report_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+# -------------------------
+# Config loading / merging
+# -------------------------
+def load_config_file(explicit_path: Optional[str] = None) -> dict:
+    """
+    Load configuration JSON from:
+      - explicit_path (if provided)
+      - ./generator.config.json
+      - <script_dir>/generator.config.json
+    Returns empty dict if none found or parse error.
+    """
+    candidates = []
+    if explicit_path:
+        candidates.append(Path(explicit_path))
+    candidates.append(Path.cwd() / "generator.config.json")
+    script_dir = Path(__file__).parent if "__file__" in globals() else Path.cwd()
+    candidates.append(script_dir / "generator.config.json")
+
+    for p in candidates:
+        try:
+            if p and p.exists():
+                with open(p, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception:
+            # ignore parse errors for now
+            continue
+    return {}
+
+
+def merge_placeholders_from_file(placeholders_path: Optional[str]):
+    """If provided, merge external JSON placeholders into EXT_COMMENT_PLACEHOLDER."""
+    global EXT_COMMENT_PLACEHOLDER
+    if not placeholders_path:
+        return
+    p = Path(placeholders_path)
+    if not p.exists():
+        logging.warning(f"⚠️ Placeholders file not found: {placeholders_path}")
+        return
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            for k, v in data.items():
+                EXT_COMMENT_PLACEHOLDER[k] = v
+            logging.info(f"ℹ️ Loaded placeholders from {placeholders_path}")
+        else:
+            logging.warning("⚠️ Placeholders file must contain a JSON object mapping extensions to text.")
+    except Exception as e:
+        logging.warning(f"⚠️ Failed to load placeholders: {e}")
 
 
 # -------------------------
@@ -632,9 +727,10 @@ def write_extension_report(
 def main():
     parser = argparse.ArgumentParser(description="Generate project folder from Markdown spec")
     parser.add_argument("input", help="Markdown file path")
-    parser.add_argument("-o", "--output", default="output_folder", help="Output folder")
+    parser.add_argument("-o", "--output", default="output_folder", help="Output folder (default: output_folder)")
     parser.add_argument("--strict", action="store_true", help="Abort on errors")
     parser.add_argument("--dry", action="store_true", help="Dry run (no writing)")
+    parser.add_argument("--preview", action="store_true", help="Preview planned tree and assignments (no writing)")
     parser.add_argument("--verbose", action="store_true", help="Verbose logging")
     parser.add_argument("-q", "--quiet", action="store_true", help="Quiet (errors only)")
     parser.add_argument("--debug", action="store_true", help="Debug logging")
@@ -646,9 +742,46 @@ def main():
     parser.add_argument("--extension-report", metavar="FILE", help="Write audit report (default: report.md in output)")
     parser.add_argument("--strip-hints", action="store_true", help="Strip first-line hint comments from rescued content")
     parser.add_argument("--zip", action="store_true", help="Zip the output folder after generation")
+    parser.add_argument("--tar", action="store_true", help="Tar.gz the output folder after generation")
+    parser.add_argument("--placeholders", metavar="FILE", help="JSON file with placeholder overrides")
+    parser.add_argument("--no-overwrite", action="store_true", help="Do not overwrite existing files")
+    parser.add_argument("--config", metavar="FILE", help="Path to generator.config.json to load defaults")
     args = parser.parse_args()
 
-    # logging level
+    # load config file and merge defaults (CLI overrides config)
+    cfg = load_config_file(args.config)
+    # apply config defaults if CLI not provided (we check for each arg)
+    # Basic approach: for each known option, if arg is default or falsy, take from config
+    # We'll allow config to include keys: output, skip_empty, ignore, files_always, dirs_always, strip_hints, zip, tar, placeholders, no_overwrite
+    def take_default(name, current, expect_type=None):
+        if expect_type == bool:
+            return bool(current) if name not in cfg else bool(cfg[name])
+        if current:
+            return current
+        if name in cfg:
+            return cfg[name]
+        return current
+
+    # Merge some args from config when user hasn't provided
+    args.output = take_default("output", args.output, expect_type=None)
+    if not args.ignore and "ignore" in cfg:
+        args.ignore = cfg.get("ignore", [])
+    if not args.files_always and "files_always" in cfg:
+        args.files_always = cfg.get("files_always", [])
+    if not args.dirs_always and "dirs_always" in cfg:
+        args.dirs_always = cfg.get("dirs_always", [])
+    if not args.placeholders and "placeholders" in cfg:
+        args.placeholders = cfg.get("placeholders")
+    if not args.strip_hints and cfg.get("strip_hints"):
+        args.strip_hints = bool(cfg.get("strip_hints"))
+    if not args.zip and cfg.get("zip"):
+        args.zip = bool(cfg.get("zip"))
+    if not args.tar and cfg.get("tar"):
+        args.tar = bool(cfg.get("tar"))
+    if not args.no_overwrite and cfg.get("no_overwrite"):
+        args.no_overwrite = bool(cfg.get("no_overwrite"))
+
+    # logging
     if args.debug:
         level = logging.DEBUG
     elif args.quiet:
@@ -656,6 +789,9 @@ def main():
     else:
         level = logging.INFO
     logging.basicConfig(level=level, format="%(message)s")
+
+    # placeholders merging
+    merge_placeholders_from_file(args.placeholders)
 
     start = time.time()
     in_path = Path(args.input)
@@ -683,21 +819,49 @@ def main():
     # final rescue pass for remaining unassigned using first-line hints
     unassigned, rescue_warnings = try_rescue_unassigned(unassigned, tree_entries, code_map, strip_hints=args.strip_hints)
 
-    # aggregate warnings/errors
     all_warnings: List[str] = mapping_warnings[:]
     all_warnings.extend(rescue_warnings)
     errors: List[str] = []
-    # optional strict behavior
-    if errors and args.strict:
-        logging.error("❌ Strict mode: aborting due to errors.")
-        sys.exit(1)
+
+    # if preview requested, show planned assignments and exit
+    if args.preview:
+        print("\n---- Preview: Planned file assignments ----\n")
+        for f in tree_entries:
+            if is_probably_file(Path(f).name, files_always, dirs_always):
+                assigned = code_map.get(f, [])
+                status = "placeholder" if not assigned else "assigned"
+                print(f"{f} -> {status} ({len(assigned)} block(s))")
+            else:
+                print(f"{f}/")
+        if unassigned:
+            print("\nUnassigned code blocks:", len(unassigned))
+            for i, u in enumerate(unassigned, 1):
+                first = u.splitlines()[0] if u else ""
+                print(f"  [{i}] first-line: {first[:80]}")
+        else:
+            print("\nNo unassigned blocks.")
+        print("\n---- End preview ----\n")
+        # write a small JSON summary if requested
+        if args.json_summary:
+            preview_summary = {
+                "files_in_tree": len([f for f in tree_entries if is_probably_file(Path(f).name, files_always, dirs_always)]),
+                "unassigned_blocks": len(unassigned),
+            }
+            try:
+                with open(args.json_summary, "w", encoding="utf-8") as jf:
+                    json.dump(preview_summary, jf, indent=2)
+                logging.info(f"ℹ️ Preview summary written to {args.json_summary}")
+            except Exception as e:
+                logging.warning(f"⚠️ Could not write json summary: {e}")
+        return
 
     # prepare output
     out_root = Path(args.output)
-    if out_root.exists() and not args.dry:
+    # remove only if exists and not dry; respect no_overwrite flag by not deleting existing folder
+    if out_root.exists() and not args.dry and not args.no_overwrite:
         shutil.rmtree(out_root)
 
-    created_dirs, created_files, write_warnings = reconcile_and_write(
+    created_dirs, created_files, write_warnings, total_lines_written, placeholders_created, files_written_count = reconcile_and_write(
         tree_entries,
         code_map,
         out_root,
@@ -707,6 +871,7 @@ def main():
         ignore_patterns=args.ignore,
         files_always=files_always,
         dirs_always=dirs_always,
+        no_overwrite=args.no_overwrite,
     )
 
     # write unassigned files into UNASSIGNED/
@@ -716,7 +881,7 @@ def main():
         for i, block in enumerate(unassigned, 1):
             (un_dir / f"unassigned_{i}.txt").write_text(block, encoding="utf-8")
 
-    # verification (adds to write_warnings)
+    # verification
     verify_output(out_root, tree_entries, code_map, write_warnings)
 
     elapsed = time.time() - start
@@ -726,18 +891,29 @@ def main():
         "dirs_created": len(created_dirs),
         "unassigned_blocks": len(unassigned),
         "issues": write_warnings + all_warnings,
+        "lines_written": total_lines_written,
+        "placeholders_created": placeholders_created,
+        "files_written_count": files_written_count,
     }
 
-    # json summary if requested
+    # json summary
     if args.json_summary:
-        with open(args.json_summary, "w", encoding="utf-8") as jf:
-            json.dump(summary, jf, indent=2)
+        try:
+            with open(args.json_summary, "w", encoding="utf-8") as jf:
+                json.dump(summary, jf, indent=2)
+            logging.info(f"ℹ️ JSON summary written to {args.json_summary}")
+        except Exception as e:
+            logging.warning(f"⚠️ Could not write json summary: {e}")
 
-    # write report (default to report.md inside output root)
+    # write report
     report_path = Path(args.extension_report) if args.extension_report else (out_root / "report.md")
-    write_extension_report(out_root, tree_entries, code_map, unassigned, write_warnings + all_warnings, errors, report_path, summary, elapsed, rescue_warnings)
+    try:
+        write_extension_report(out_root, tree_entries, code_map, unassigned, write_warnings + all_warnings, errors, report_path, summary, elapsed, rescue_warnings)
+        logging.info(f"ℹ️ Report written to {report_path}")
+    except Exception as e:
+        logging.warning(f"⚠️ Could not write report: {e}")
 
-    # populate generated project's README.md with non-file sections
+    # populate project's README.md with non-file sections
     project_readme = extract_project_readme(tokens, tree_entries)
     if project_readme and not args.dry:
         project_readme_path = out_root / "README.md"
@@ -745,20 +921,30 @@ def main():
         with open(project_readme_path, mode, encoding="utf-8") as f:
             f.write("\n\n" + project_readme)
 
-    # zip output if requested (skip in dry)
+    # archive outputs if requested and not dry
     if args.zip and not args.dry:
         try:
             archive_path = shutil.make_archive(str(out_root), "zip", root_dir=out_root)
             logging.info(f"📦 Zipped project folder at {archive_path}")
         except Exception as e:
             logging.warning(f"⚠️ Failed to zip output folder: {e}")
+    if args.tar and not args.dry:
+        try:
+            tar_path = str(out_root) + ".tar.gz"
+            with tarfile.open(tar_path, "w:gz") as tar:
+                tar.add(out_root, arcname=out_root.name)
+            logging.info(f"📦 Tar.gz project folder at {tar_path}")
+        except Exception as e:
+            logging.warning(f"⚠️ Failed to tar.gz output folder: {e}")
 
-    # final console output unless quiet
+    # final console output
     if level <= logging.INFO:
         logging.info("\n---- Final Report ----")
         logging.info(f"📄 Files in tree: {summary['files_in_tree']}")
-        logging.info(f"📄 Files created: {summary['files_created']}")
+        logging.info(f"📄 Files created (expected): {summary['files_created']}")
         logging.info(f"📁 Dirs created: {summary['dirs_created']}")
+        logging.info(f"📚 Lines written (approx): {summary['lines_written']}")
+        logging.info(f"🧾 Placeholder-only files: {summary['placeholders_created']}")
         if summary["issues"]:
             logging.warning("\n⚠️ Issues:")
             for w in summary["issues"]:
@@ -768,7 +954,7 @@ def main():
         if summary["unassigned_blocks"]:
             logging.warning(f"⚠️ {summary['unassigned_blocks']} unassigned code block(s) saved in UNASSIGNED/")
 
-    # exit code: 0 (could be changed if strict and errors)
+    # done
     return
 
 
