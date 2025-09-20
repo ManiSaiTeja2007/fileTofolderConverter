@@ -31,6 +31,8 @@ def map_headings_to_files(
     n = len(tokens)
     while i < n:
         tok = tokens[i]
+
+        # heading handling
         if tok.type == "heading_open":
             inline = tokens[i + 1] if (i + 1) < n else None
             heading_text = inline.content.strip() if inline and inline.type == "inline" else ""
@@ -49,19 +51,26 @@ def map_headings_to_files(
                         current_file = None
             i += 1
             continue
+
+        # fence blocks
         if tok.type == "fence":
             fence_info = getattr(tok, "info", "") or ""
             fence_info = fence_info.strip()
             fence_content = textwrap.dedent(tok.content).rstrip()
+
             if skip_next_fence_for_file_structure:
                 skip_next_fence_for_file_structure = False
                 i += 1
                 continue
+
             if current_file and current_file in code_map:
                 code_map[current_file].append(fence_content)
                 i += 1
                 continue
+
+            # infer via fence info
             candidates = infer_targets_from_fence_info(fence_info, list(code_map.keys()))
+            # prioritize exact basename matches
             exact = [c for c in candidates if Path(c).name.lower() == fence_info.lower()]
             if len(exact) == 1:
                 code_map[exact[0]].append(fence_content)
@@ -78,6 +87,8 @@ def map_headings_to_files(
                 unassigned.append(fence_content)
                 i += 1
                 continue
+
+            # Check for hint in first line
             first_line = fence_content.splitlines()[0] if fence_content else ""
             if first_line.strip().startswith("//") or first_line.strip().startswith("#"):
                 hint = re.sub(r"^(\s*//\s*|\s*#\s*)", "", first_line).strip()
@@ -111,14 +122,13 @@ def map_headings_to_files(
             unassigned.append(fence_content)
             i += 1
             continue
-        if tok.type == "paragraph_open":
+
+        # Handle paragraphs under headings as potential content (but skip if no current_file)
+        if tok.type == "paragraph_open" and current_file:
             inline = tokens[i + 1] if (i + 1) < n else None
-            para_text = ""
-            if inline and inline.type == "inline":
-                para_text = inline.content.strip()
-            if current_file and current_file in code_map:
-                if para_text:
-                    code_map[current_file].append(para_text)
+            para_text = inline.content.strip() if inline and inline.type == "inline" else ""
+            if para_text:
+                code_map[current_file].append(para_text)
             j = i + 1
             while j < n and tokens[j].type != "paragraph_close":
                 j += 1
