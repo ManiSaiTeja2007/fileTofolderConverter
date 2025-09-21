@@ -10,4 +10,5 @@ pytest_results.xml
 output_folder/
 output_folder.zip
 workspace/
+bat/
 .vscode/           
