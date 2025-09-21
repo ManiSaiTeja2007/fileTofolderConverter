@@ -57,6 +57,8 @@ def map_headings_to_files(
             fence_info = getattr(tok, "info", "") or ""
             fence_info = fence_info.strip()
             fence_content = textwrap.dedent(tok.content).rstrip()
+            # Unescape backticks to restore original content
+            fence_content = fence_content.replace(r"\```", "```")
 
             if skip_next_fence_for_file_structure:
                 skip_next_fence_for_file_structure = False

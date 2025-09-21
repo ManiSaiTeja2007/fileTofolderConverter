@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 generator.py
-Markdown → Project folder generator (Phase 1)
+Markdown → Project folder generator (Phase 1) and Folder → Markdown converter
 
-Orchestrates function calls to generate project structure from Markdown.
+Orchestrates function calls to generate project structure from Markdown or convert a folder to Markdown.
 """
 
 from __future__ import annotations
@@ -34,12 +34,12 @@ from utils.should_update.should_update import should_update
 from utils.load_cache.load_cache import load_cache
 from utils.save_cache.save_cache import save_cache
 from utils.set_executable.set_executable import set_executable
-from utils.export_to_markdown.export_to_markdown import export_to_markdown
+from utils.export_to_markdown.export_to_markdown import export_to_markdown, folder_to_markdown
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate project folder from Markdown spec")
-    parser.add_argument("input", help="Markdown file path")
-    parser.add_argument("-o", "--output", default="output_folder", help="Output folder (default: output_folder)")
+    parser = argparse.ArgumentParser(description="Generate project folder from Markdown spec or convert folder to Markdown")
+    parser.add_argument("input", help="Markdown file path or folder path for --folder-to-md")
+    parser.add_argument("-o", "--output", default="output_folder", help="Output folder or markdown file (default: output_folder or folder_name.md)")
     parser.add_argument("--strict", action="store_true", help="Abort on errors")
     parser.add_argument("--dry", action="store_true", help="Dry run (no writing)")
     parser.add_argument("--preview", action="store_true", help="Preview planned tree and assignments (no writing)")
@@ -63,6 +63,8 @@ def main():
     parser.add_argument("--set-exec", action="store_true", help="Set executable flag on *.sh and Procfile/Makefile")
     parser.add_argument("--export-md", metavar="FILE", help="Export generated project back into Markdown")
     parser.add_argument("--extension-report", metavar="FILE", help="Custom report file (default: report.md)")
+    parser.add_argument("--folder-to-md", action="store_true", help="Convert folder to markdown file")
+    parser.add_argument("--no-compare", action="store_true", help="Disable file structure comparison for --folder-to-md")
 
     args = parser.parse_args()
 
@@ -94,6 +96,22 @@ def main():
     else:
         level = logging.INFO
     logging.basicConfig(level=level, format="%(message)s")
+
+    # Handle folder-to-md mode
+    if args.folder_to_md:
+        folder = Path(args.input)
+        if not folder.is_dir():
+            logging.error(f"❌ Input must be a directory for --folder-to-md: {folder}")
+            sys.exit(2)
+        output_md = Path(args.output) if args.output.endswith(".md") else Path(f"{folder.name}.md")
+        file_list, warnings = folder_to_markdown(folder, output_md, compare=not args.no_compare)
+        logging.info(f"Generated {output_md} with {len(file_list)} files")
+        if warnings:
+            logging.warning("Warnings:\n" + "\n".join(warnings))
+        if args.json_summary:
+            with open(args.json_summary, "w", encoding="utf-8") as jf:
+                json.dump({"files_converted": len(file_list), "warnings": warnings}, jf, indent=2)
+        return
 
     # Placeholders merging
     merge_placeholders_from_file(args.placeholders)
@@ -201,6 +219,7 @@ def main():
     # Phase 2 features
     if args.interactive:
         logging.info("ℹ️ Interactive conflict resolution enabled")
+        resolve_conflict_interactive(created_files, out_root)
 
     if args.html_report:
         args.html_report = Path(args.output) / Path(args.html_report).name
