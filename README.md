@@ -407,6 +407,8 @@ src/
 
 ## License
 
-MIT – Free to use, modify, and distribute. See [LICENSE](LICENSE) for details.
+This project is licensed under the [GNU General Public License v3.0](LICENSE).  
+You are free to use, modify, and distribute this software provided that any
+derivative work is also licensed under the GPL v3.
 
 ---
