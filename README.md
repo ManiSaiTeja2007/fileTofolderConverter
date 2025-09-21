@@ -1,6 +1,6 @@
 # Markdown ↔ Project Generator
 
-[![Python 3.12+](https://img.shields.io/badge/Python-3.12+-blue)](https://www.python.org/downloads/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.12+](https://img.shields.io/badge/Python-3.12+-blue)](https://www.python.org/downloads/) [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
 `generator.py` is a versatile Python tool that seamlessly converts **Markdown specifications** into structured **project folders** or transforms **existing folders** into reproducible **Markdown files**. Designed for developers, it supports bidirectional workflows, robust validation, and flexible configuration, making it ideal for prototyping, documentation, and project scaffolding.
 
