@@ -1,0 +1,17 @@
+venv/
+.mypycache/
+__pycache__/
+.mypy_cache/
+.pytest_cache/
+test/
+test.md
+tests/
+pytest_results.xml
+
+
+output_folder/
+output_folder.zip
+output_folder.md
+workspace/
+bat/
+.vscode/           
