@@ -8,7 +8,7 @@ from utils.safe_write_text.safe_write_text import safe_write_text
 from utils.validate_entry_path.validate_entry_path import validate_entry_path
 from utils.normalize_path_segment.normalize_path_segment import normalize_path_segment
 from utils.is_probably_file.is_probably_file import is_probably_file
-from utils.config.config import EXT_COMMENT_PLACEHOLDER
+from utils.config.config import EXT_COMMENT_PLACEHOLDER, get_comment_prefix
 
 def reconcile_and_write(
     tree_entries: List[str],
@@ -21,6 +21,7 @@ def reconcile_and_write(
     files_always: Optional[Set] = None,
     dirs_always: Optional[Set] = None,
     no_overwrite: bool = False,
+    heading_map: Dict[str, str] = {},
 ) -> Tuple[Set, List[str], List[str], int, int, int]:
     """
     Returns (created_dirs, created_files, warnings, total_lines_written, placeholders_created, files_written_count)
@@ -57,6 +58,20 @@ def reconcile_and_write(
                 ext = "." + name.split(".")[-1] if "." in name else ""
                 content = EXT_COMMENT_PLACEHOLDER.get(ext, EXT_COMMENT_PLACEHOLDER["default"])
                 placeholders_created += 1
+
+            # Prepend heading as comment if available
+            if entry_clean in heading_map:
+                heading = heading_map[entry_clean]
+                ext = Path(entry_clean).suffix.lower()
+                prefix = get_comment_prefix(ext)
+                if prefix:
+                    prepended = prefix + heading
+                    if prefix == "/* ":
+                        prepended += " */"
+                    elif prefix == "<!-- ":
+                        prepended += " -->"
+                    content = prepended + "\n" + content
+
             if skip_empty and (not content_parts):
                 warnings.append(f"ℹ️ Skipped placeholder file {entry_clean} due to --skip-empty")
                 continue

@@ -44,6 +44,27 @@ SPECIAL_FILES = {
     "docker-compose.yaml",
 }
 
+def get_comment_prefix(ext: str) -> str:
+    ext = ext.lower()
+    prefixes = {
+        ".py": "# ",
+        ".sh": "# ",
+        ".yml": "# ",
+        ".yaml": "# ",
+        ".txt": "# ",
+        ".js": "// ",
+        ".ts": "// ",
+        ".tsx": "// ",
+        ".jsx": "// ",
+        ".java": "// ",
+        ".go": "// ",
+        ".rs": "// ",
+        ".md": "<!-- ",
+        ".html": "<!-- ",
+        ".css": "/* ",
+    }
+    return prefixes.get(ext, "")
+
 def load_config_file(explicit_path: str | None = None) -> dict:
     """
     Load configuration JSON from:

@@ -133,10 +133,10 @@ def main():
     dirs_always = set(args.dirs_always)
 
     tree_entries = parse_ascii_tree_block(fs_block, files_always, dirs_always)
-    code_map, unassigned, mapping_warnings = map_headings_to_files(
+    code_map, unassigned, mapping_warnings, heading_map = map_headings_to_files(
         tokens, tree_entries, files_always, dirs_always, strip_hints=args.strip_hints
     )
-    unassigned, rescue_warnings = try_rescue_unassigned(unassigned, tree_entries, code_map, strip_hints=args.strip_hints)
+    unassigned, rescue_warnings = try_rescue_unassigned(unassigned, tree_entries, code_map, heading_map, strip_hints=args.strip_hints)
 
     all_warnings = mapping_warnings + rescue_warnings
     errors = []
@@ -170,7 +170,7 @@ def main():
         tree_entries, code_map, out_root,
         dry_run=args.dry, verbose=args.verbose, skip_empty=args.skip_empty,
         ignore_patterns=args.ignore, files_always=files_always, dirs_always=dirs_always,
-        no_overwrite=args.no_overwrite
+        no_overwrite=args.no_overwrite, heading_map=heading_map
     )
 
     if unassigned and not args.dry:
