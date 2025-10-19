@@ -5,6 +5,7 @@ from pathlib import Path
 import logging
 
 from utils.resolve_conflict_interactive.resolve_conflict_interactive import resolve_conflict_interactive
+from utils.config.config import get_comment_prefix, get_comment_suffix
 
 def extract_hint_from_code(code: str, max_lines: int = 2) -> Tuple[Optional[str], int]:
     """
@@ -116,7 +117,10 @@ def process_hint_match(
                         lines[:hint_line_num] + lines[hint_line_num + 1:]
                     ).rstrip()
                 else:
-                    body = f"# {target}\n{code.lstrip()}"
+                    ext = Path(target).suffix.lower()
+                    prefix = get_comment_prefix(ext)
+                    suffix = get_comment_suffix(ext)
+                    body = f"{prefix}{target}{suffix}\n{code.lstrip()}"
                 rescued_warnings.append(f"ℹ️ Replaced hint '{existing_hint}' with '{target}' (more specific)")
         elif strip_hints and hint_line_num >= 0:
             # Strip hint without replacement
