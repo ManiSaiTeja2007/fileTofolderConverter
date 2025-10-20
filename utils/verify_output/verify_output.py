@@ -87,10 +87,14 @@ def verify_output(
             warnings.append(f"⚠️ Error processing tree entry '{original_entry}': {e}")
             continue
     
-    # Verify expected files
+        # Verify expected files
     for cleaned_path, original_path in expected_files.items():
         try:
+            # Normalize the path to avoid slash or case issues
+            cleaned_path = os.path.normpath(cleaned_path).lstrip('./')
             fs_path = out_root / cleaned_path
+            
+            logging.debug(f"Checking file existence: {fs_path}")
             
             # Check file existence
             if not fs_path.exists():
@@ -98,12 +102,12 @@ def verify_output(
                 stats["files_missing"] += 1
                 continue
             
-            stats["files_found"] += 1
-            
-            # Check if it's actually a file
+            # Check if it's actually a file (and not a directory or symlink)
             if not fs_path.is_file():
                 warnings.append(f"❌ Path exists but is not a file: {cleaned_path}")
                 continue
+            
+            stats["files_found"] += 1
             
             # Check file content
             code_map_key = find_code_map_key(cleaned_path, original_path, code_map)
