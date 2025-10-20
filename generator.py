@@ -17,6 +17,7 @@ import tarfile
 import json
 from pathlib import Path
 import difflib
+import traceback
 
 __version__ = "0.2.0"
 
@@ -30,13 +31,13 @@ from utils.extract_project_readme.extract_project_readme import extract_project_
 from utils.reconcile_and_write.reconcile_and_write import reconcile_and_write
 from utils.verify_output.verify_output import verify_output
 from utils.write_extension_report.write_extension_report import write_extension_report
-from utils.resolve_conflict_interactive.resolve_conflict_interactive import resolve_conflict_interactive
+from utils.resolve_conflict_interactive.resolve_conflict_interactive import resolve_conflict_interactive, resolve_conflict_batch
 from utils.write_html_report.write_html_report import write_html_report
 from utils.is_probably_file.is_probably_file import is_probably_file
-from utils.should_update.should_update import should_update
 from utils.cache.cache import load_cache, save_cache
 from utils.set_executable.set_executable import set_executable
 from utils.folder_to_markdown.folder_to_markdown import folder_to_markdown
+from utils.validate_entry_path.validate_entry_path import validate_entry_path
 
 def main():
     parser = argparse.ArgumentParser(
@@ -48,14 +49,14 @@ def main():
     parser.add_argument("--strict", action="store_true", help="Abort on errors or warnings")
     parser.add_argument("--dry", action="store_true", help="Dry run (no writing)")
     parser.add_argument("--preview", action="store_true", help="Preview planned tree and assignments (no writing)")
-    parser.add_argument("--verbose", action="store_true", help="Verbosity logging")
+    parser.add_argument("--verbose", action="store_true", help="Verbose logging")
     parser.add_argument("-q", "--quiet", action="store_true", help="Quiet (errors only)")
     parser.add_argument("--debug", action="store_true", help="Debug logging")
     parser.add_argument("--skip-empty", action="store_true", help="Do not create placeholder-only files")
     parser.add_argument("--no-overwrite", action="store_true", help="Do not overwrite existing files")
     parser.add_argument("--json-summary", metavar="FILE", help="Write JSON summary to FILE")
-    parser.add_argument("--ignore", nargs="*", default=[], help="Glob patterns to ignore (e.g., '*.md')")
-    parser.add_argument("--files-always", nargs="*", default=[], help="Names to always treat as files")
+    parser.add_argument("--ignore", nargs="*", default=["__pycache__", "*.pyc", ".git"], help="Glob patterns to ignore")
+    parser.add_argument("--files-always", nargs="*", default=["Procfile", "Makefile"], help="Names to always treat as files")
     parser.add_argument("--dirs-always", nargs="*", default=[], help="Names to always treat as dirs")
     parser.add_argument("--placeholders", metavar="FILE", help="JSON file with placeholder overrides")
     parser.add_argument("--config", metavar="FILE", help="Path to generator.config.json to load defaults")
@@ -63,61 +64,66 @@ def main():
     parser.add_argument("--zip", action="store_true", help="Zip the output folder after generation")
     parser.add_argument("--tar", action="store_true", help="Tar.gz the output folder after generation")
     parser.add_argument("--interactive", action="store_true", help="Prompt user when conflicts occur")
-    parser.add_argument("--html-report", metavar="FILE", nargs="?", const="report.html", default=None, help="Write HTML interactive report (default: report.html)")
+    parser.add_argument("--html-report", metavar="FILE", nargs="?", const="report.html", help="Write HTML interactive report (default: report.html)")
     parser.add_argument("--incremental", action="store_true", help="Only regenerate changed files")
-    parser.add_argument("--set-exec", action="store_true", help="Set executable flag on *.sh and Procfile/Makefile")
+    parser.add_argument("--set-exec", action="store_true", help="Set executable flag on *.sh, Procfile, Makefile")
     parser.add_argument("--export-md", metavar="FILE", help="Export generated project back into Markdown")
     parser.add_argument("--extension-report", metavar="FILE", help="Custom report file (default: report.md)")
     parser.add_argument("--folder-to-md", action="store_true", help="Convert folder to markdown file")
     parser.add_argument("--no-compare", action="store_true", help="Disable file structure comparison for --folder-to-md")
     parser.add_argument("--log-file", metavar="FILE", help="Redirect logs to file")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    parser.add_argument("--fallback-level", choices=["low", "medium", "high"], default="low", help="Fallback level for unassigned blocks (low: strict, medium: fuzzy match, high: auto-assign)")
+    parser.add_argument("--fallback-level", choices=["low", "medium", "high"], default="low", help="Fallback level for unassigned blocks")
+    parser.add_argument("--conflict-strategy", choices=["first", "longest", "shortest", "most_specific", "skip"], default="first", help="Batch conflict resolution strategy")
 
     args = parser.parse_args()
 
+    # Validate mutually exclusive flags
+    if args.quiet and args.debug:
+        logging.error("❌ Cannot use --quiet and --debug together")
+        sys.exit(1)
+    if args.dry and (args.zip or args.tar or args.set_exec or args.export_md):
+        logging.error("❌ --dry cannot be used with --zip, --tar, --set-exec, or --export-md")
+        sys.exit(1)
+    if args.interactive and args.preview:
+        logging.error("❌ --interactive cannot be used with --preview")
+        sys.exit(1)
+
     # Logging setup
-    if args.debug:
-        level = logging.DEBUG
-    elif args.quiet:
-        level = logging.ERROR
-    else:
-        level = logging.INFO
+    level = logging.DEBUG if args.debug else logging.ERROR if args.quiet else logging.INFO
     handlers = [logging.StreamHandler()]
     if args.log_file:
-        handlers.append(logging.FileHandler(args.log_file, encoding="utf-8"))
-    logging.basicConfig(level=level, format="%(message)s", handlers=handlers)
+        try:
+            handlers.append(logging.FileHandler(args.log_file, encoding="utf-8"))
+        except Exception as e:
+            logging.error(f"❌ Failed to set up log file {args.log_file}: {e}")
+            sys.exit(1)
+    logging.basicConfig(level=level, format="%(asctime)s - %(levelname)s - %(message)s", handlers=handlers)
 
     try:
         # Load config & merge
-        try:
-            cfg = load_config_file(args.config)
-        except Exception as e:
-            logging.warning(f"⚠️ Failed to load config file: {e}. Using defaults.")
-            cfg = {}
-
+        cfg = load_config_file(args.config) if args.config else {}
         def merge_flag(name, current, expected_type=None):
             if current not in (None, [], False, "output_folder"):
                 return current
-            if name in cfg:
-                return cfg[name]
-            return current
+            return cfg.get(name, current)
 
         args.output = merge_flag("output", args.output)
-        args.ignore = merge_flag("ignore", args.ignore)
-        args.files_always = merge_flag("files_always", args.files_always)
-        args.dirs_always = merge_flag("dirs_always", args.dirs_always)
+        args.ignore = merge_flag("ignore", args.ignore, list)
+        args.files_always = merge_flag("files_always", args.files_always, list)
+        args.dirs_always = merge_flag("dirs_always", args.dirs_always, list)
         args.placeholders = merge_flag("placeholders", args.placeholders)
         args.strip_hints = merge_flag("strip_hints", args.strip_hints, bool)
         args.zip = merge_flag("zip", args.zip, bool)
         args.tar = merge_flag("tar", args.tar, bool)
         args.no_overwrite = merge_flag("no_overwrite", args.no_overwrite, bool)
+        args.conflict_strategy = merge_flag("conflict_strategy", args.conflict_strategy)
 
         # Handle folder-to-md mode
         if args.folder_to_md:
             folder = Path(args.input)
-            if not folder.is_dir():
-                logging.error(f"❌ Input must be a directory for --folder-to-md: {folder}")
+            if not folder.exists() or not folder.is_dir():
+                logging.error(f"❌ Input must be an existing directory for --folder-to-md: {folder}")
                 sys.exit(2)
             output_md = Path(args.output) if args.output.endswith(".md") else Path(f"{folder.name}.md")
             file_list, warnings = folder_to_markdown(
@@ -140,16 +146,17 @@ def main():
             return
 
         # Placeholders merging
-        try:
-            merge_placeholders_from_file(args.placeholders)
-        except Exception as e:
-            logging.warning(f"⚠️ Failed to merge placeholders: {e}. Using defaults.")
+        if args.placeholders:
+            try:
+                merge_placeholders_from_file(args.placeholders)
+            except Exception as e:
+                logging.warning(f"⚠️ Failed to merge placeholders: {e}. Using defaults.")
 
         # Load input markdown
         start = time.time()
         in_path = Path(args.input)
-        if not in_path.exists():
-            logging.error(f"❌ Input file not found: {in_path}")
+        if not in_path.exists() or not in_path.is_file():
+            logging.error(f"❌ Input file not found or not a file: {in_path}")
             sys.exit(2)
 
         try:
@@ -170,6 +177,7 @@ def main():
         files_always = set(args.files_always)
         dirs_always = set(args.dirs_always)
 
+        # Parse and validate tree entries
         tree_entries = parse_ascii_tree_block(fs_block, files_always, dirs_always)
         if not tree_entries:
             logging.warning("⚠️ No valid entries in file structure block.")
@@ -177,25 +185,87 @@ def main():
                 logging.info("ℹ️ Fallback: Generating structure from headings.")
                 tree_entries = [t["value"].strip().lstrip("./").replace("\\", "/") for t in tokens if t["type"] == "heading"]
 
+        validated_tree_entries = []
+        validation_errors = []
+        for entry in tree_entries:
+            error = validate_entry_path(entry)
+            if error:
+                validation_errors.append(f"Invalid path entry '{entry}': {error}")
+            else:
+                validated_tree_entries.append(entry)
+        if validation_errors:
+            logging.warning("⚠️ Path validation issues:\n" + "\n".join(validation_errors))
+            if args.strict:
+                sys.exit(1)
+        tree_entries = validated_tree_entries
+        if not tree_entries:
+            logging.error("❌ No valid tree entries after validation")
+            sys.exit(3)
+
+        # Map headings to files with conflict resolution
         code_map, unassigned, mapping_warnings, heading_map = map_headings_to_files(
             tokens, tree_entries, files_always, dirs_always, strip_hints=args.strip_hints, interactive=args.interactive
         )
+
+        # Handle conflicts in code_map
+        if code_map:
+            for target, blocks in list(code_map.items()):
+                if len(blocks) > 1:  # Multiple blocks for one file
+                    if args.interactive:
+                        try:
+                            resolved_blocks = resolve_conflict_interactive(target, blocks)
+                            if resolved_blocks:
+                                code_map[target] = [resolved_blocks] if isinstance(resolved_blocks, str) else resolved_blocks
+                                mapping_warnings.append(f"ℹ️ Interactively resolved conflict for {target}: kept {len(code_map[target])} block(s)")
+                            else:
+                                unassigned.extend(blocks)
+                                del code_map[target]
+                                mapping_warnings.append(f"ℹ️ Skipped conflict for {target} during interactive resolution")
+                        except Exception as e:
+                            logging.warning(f"⚠️ Failed interactive resolution for {target}: {e}")
+                            mapping_warnings.append(f"⚠️ Conflict unresolved for {target}")
+                    else:
+                        try:
+                            resolved = resolve_conflict_batch(target, blocks, strategy=args.conflict_strategy)
+                            if resolved:
+                                code_map[target] = [resolved] if isinstance(resolved, str) else resolved
+                                mapping_warnings.append(f"ℹ️ Batch resolved conflict for {target} using {args.conflict_strategy}")
+                            else:
+                                unassigned.extend(blocks)
+                                del code_map[target]
+                                mapping_warnings.append(f"ℹ️ Skipped conflict for {target} using {args.conflict_strategy}")
+                        except Exception as e:
+                            logging.warning(f"⚠️ Failed batch resolution for {target}: {e}")
+                            mapping_warnings.append(f"⚠️ Conflict unresolved for {target}")
+
         unassigned, rescue_warnings = try_rescue_unassigned(
             unassigned, tree_entries, code_map, heading_map, strip_hints=args.strip_hints, interactive=args.interactive, fallback_level=args.fallback_level
         )
 
-        # Fuzzy matching fallback for unassigned blocks
+        # Fuzzy matching for unassigned blocks
         if unassigned and args.fallback_level in ("medium", "high"):
             still_unassigned = []
             for code in unassigned:
                 lines = code.splitlines()
                 hint = lines[0].strip().lstrip("./").replace("\\", "/") if lines else ""
                 if hint:
-                    closest = difflib.get_close_matches(hint, tree_entries, n=1, cutoff=0.8)
-                    if closest and args.fallback_level == "high":
-                        code_map.setdefault(closest[0], []).append(code)
-                        rescue_warnings.append(f"ℹ️ Fuzzy matched unassigned block to {closest[0]}")
-                        continue
+                    closest = difflib.get_close_matches(hint, tree_entries, n=3, cutoff=0.8)
+                    if closest:
+                        if args.interactive:
+                            try:
+                                target = resolve_conflict_interactive(hint, closest)
+                                if target:
+                                    code_map.setdefault(target, []).append(code)
+                                    rescue_warnings.append(f"ℹ️ Interactively assigned block to {target}")
+                                    continue
+                            except Exception as e:
+                                logging.warning(f"⚠️ Failed interactive assignment for hint '{hint}': {e}")
+                        else:
+                            target = resolve_conflict_batch(hint, closest, strategy=args.conflict_strategy)
+                            if target:
+                                code_map.setdefault(target, []).append(code)
+                                rescue_warnings.append(f"ℹ️ Batch assigned block to {target} using {args.conflict_strategy}")
+                                continue
                 still_unassigned.append(code)
             unassigned = still_unassigned
 
@@ -205,7 +275,7 @@ def main():
         # Preview mode
         if args.preview:
             print("\n---- Preview: Planned file assignments ----\n")
-            for f in tree_entries:
+            for f in sorted(tree_entries):
                 if is_probably_file(Path(f).name, files_always, dirs_always):
                     assigned = code_map.get(f, [])
                     status = "placeholder" if not assigned else "assigned"
@@ -238,11 +308,22 @@ def main():
                 logging.error(f"❌ Failed to remove existing output directory {out_root}: {e}")
                 sys.exit(1)
 
+        # Incremental mode
+        cache = {}
+        if args.incremental:
+            cache_file = out_root / ".generator_cache.json"
+            try:
+                cache = load_cache(cache_file)
+            except FileNotFoundError:
+                logging.info("ℹ️ No cache file found, creating new cache.")
+            except Exception as e:
+                logging.warning(f"⚠️ Failed to load cache: {e}. Regenerating all files.")
+
         created_dirs, created_files, write_warnings, total_lines_written, placeholders_created, files_written_count = reconcile_and_write(
             tree_entries, code_map, out_root,
             dry_run=args.dry, verbose=args.verbose, skip_empty=args.skip_empty,
             ignore_patterns=args.ignore, files_always=files_always, dirs_always=dirs_always,
-            no_overwrite=args.no_overwrite, heading_map=heading_map
+            no_overwrite=args.no_overwrite, heading_map=heading_map, cache=cache
         )
 
         if unassigned and not args.dry:
@@ -283,12 +364,27 @@ def main():
                               write_warnings + all_warnings, errors, report_path,
                               summary, elapsed, rescue_warnings)
 
+        if args.html_report:
+            html_path = Path(args.html_report) if args.html_report != "report.html" else (out_root / "report.html")
+            try:
+                write_html_report(
+                    tree_entries, out_root, summary, html_path,
+                    code_map=code_map, files_always=files_always,
+                    dirs_always=dirs_always, excluded_files=set(args.ignore)
+                )
+                logging.info(f"Generated HTML report at {html_path}")
+            except Exception as e:
+                logging.warning(f"⚠️ Failed to write HTML report: {e}")
+
         project_readme = extract_project_readme(tokens, tree_entries)
         if project_readme and not args.dry:
             project_readme_path = out_root / "README.md"
             try:
-                with open(project_readme_path, "a" if project_readme_path.exists() else "w", encoding="utf-8") as f:
-                    f.write("\n\n" + project_readme)
+                mode = "a" if project_readme_path.exists() else "w"
+                with open(project_readme_path, mode, encoding="utf-8") as f:
+                    if mode == "a":
+                        f.write("\n\n")
+                    f.write(project_readme)
             except Exception as e:
                 logging.warning(f"⚠️ Failed to write README: {e}")
 
@@ -296,6 +392,7 @@ def main():
         if args.zip and not args.dry:
             try:
                 shutil.make_archive(str(out_root), "zip", root_dir=out_root)
+                logging.info(f"Created zip archive: {out_root}.zip")
             except Exception as e:
                 logging.warning(f"⚠️ Failed to create zip archive: {e}")
 
@@ -303,26 +400,32 @@ def main():
             try:
                 with tarfile.open(str(out_root) + ".tar.gz", "w:gz") as tar:
                     tar.add(out_root, arcname=out_root.name)
+                logging.info(f"Created tar.gz archive: {out_root}.tar.gz")
             except Exception as e:
                 logging.warning(f"⚠️ Failed to create tar.gz archive: {e}")
 
         if args.incremental:
             cache_file = out_root / ".generator_cache.json"
             try:
-                cache = load_cache(cache_file)
+                from utils.cache.cache import cleanup_stale_cache_entries
+                cleanup_stale_cache_entries(cache, [out_root / f for f in created_files])
                 save_cache(cache_file, cache)
             except Exception as e:
-                logging.warning(f"⚠️ Failed to handle cache: {e}. Regenerating all files.")
+                logging.warning(f"⚠️ Failed to handle cache: {e}. Regenerating all files next time.")
 
         if args.set_exec:
             for f in created_files:
                 if f.endswith(".sh") or Path(f).name in ("Procfile", "Makefile"):
-                    set_executable(Path(f))
+                    try:
+                        set_executable(Path(f))
+                    except Exception as e:
+                        logging.warning(f"⚠️ Failed to set executable flag on {f}: {e}")
 
         if args.export_md:
-            args.export_md = Path(args.output) / Path(args.export_md).name
+            export_path = Path(args.output) / Path(args.export_md).name
             try:
-                folder_to_markdown(out_root, Path(args.export_md), user_ignore=args.ignore, files_always=files_always, dirs_always=dirs_always)
+                folder_to_markdown(out_root, export_path, user_ignore=args.ignore, files_always=files_always, dirs_always=dirs_always)
+                logging.info(f"Exported Markdown to {export_path}")
             except Exception as e:
                 logging.warning(f"⚠️ Failed to export Markdown: {e}")
 
@@ -334,7 +437,7 @@ def main():
         # Final console summary
         if level <= logging.INFO:
             logging.info("\n---- Final Report ----")
-            for k, v in summary.items():
+            for k, v in sorted(summary.items()):
                 logging.info(f"{k}: {v}")
             if summary["unassigned_blocks"]:
                 logging.warning(f"⚠️ {summary['unassigned_blocks']} unassigned block(s) saved in UNASSIGNED/")
@@ -342,7 +445,7 @@ def main():
                 logging.info("✅ All files created and verified successfully")
 
     except Exception as e:
-        logging.error(f"❌ Unexpected error: {e}")
+        logging.error(f"❌ Unexpected error: {e}\n{traceback.format_exc()}")
         sys.exit(1)
 
 if __name__ == "__main__":
