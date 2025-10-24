@@ -7,6 +7,7 @@ import difflib
 import logging
 from functools import lru_cache
 
+from utils.config.config import get_comment_prefix
 from utils.infer_targets_from_fence_info.infer_targets_from_fence_info import infer_targets_from_fence_info
 from utils.is_probably_file.is_probably_file import is_probably_file
 
@@ -92,11 +93,20 @@ def process_hint_replacement(
             return original_content, False
         else:
             # New hint is more specific; replace
+            lines = original_content.splitlines()
+            body = "\n".join(lines[1:]).rstrip() if len(lines) > 1 else ""
             if strip_hints:
-                lines = original_content.splitlines()
-                return "\n".join(lines[1:]).rstrip(), True
+                return body, True
             else:
-                return f"# {target_file}\n{original_content.lstrip()}", True
+                # Get file extension and appropriate comment prefix
+                try:
+                    file_extension = Path(target_file).suffix.lstrip('.')
+                    comment_prefix = get_comment_prefix(file_extension or Path(target_file).name.lower())
+                except Exception as e:
+                    logging.warning(f"⚠️ Failed to get comment prefix for '{target_file}': {e}")
+                    comment_prefix = "# "  # Fallback
+                # Strip existing hint and add new hint with dynamic comment prefix
+                return f"{comment_prefix}{target_file}\n{body}", True
     elif strip_hints:
         # Strip hint even if not similar
         lines = original_content.splitlines()

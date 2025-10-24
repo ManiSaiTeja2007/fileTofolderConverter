@@ -88,72 +88,77 @@ SPECIAL_FILES = {
 }
 
 @lru_cache(maxsize=50)
+@lru_cache(maxsize=100)
 def get_comment_prefix(ext: str) -> str:
     """
     Get comment prefix for file extension with caching.
     
     Args:
-        ext: File extension including dot (e.g., ".py")
+        ext: File extension without leading dot (e.g., "py") or empty string for extensionless files
         
     Returns:
         Comment prefix string
     """
-    ext = ext.lower().strip()
-    
+    ext = ext.lower().strip().lstrip('.') if ext else ""
     comment_prefixes = {
         # Single-line comment styles
-        ".py": "# ",
-        ".sh": "# ",
-        ".bash": "# ",
-        ".zsh": "# ",
-        ".ps1": "# ",
-        ".yml": "# ",
-        ".yaml": "# ",
-        ".cfg": "# ",
-        ".conf": "# ",
-        ".txt": "# ",
-        ".rb": "# ",
-        ".pl": "# ",
-        ".tcl": "# ",
-        ".r": "# ",
-        ".lua": "-- ",
-        ".sql": "-- ",
-        ".sqlite": "-- ",
+        "py": "# ",
+        "sh": "# ",
+        "bash": "# ",
+        "zsh": "# ",
+        "ps1": "# ",
+        "yml": "# ",
+        "yaml": "# ",
+        "cfg": "# ",
+        "conf": "# ",
+        "txt": "# ",
+        "rb": "# ",
+        "pl": "# ",
+        "tcl": "# ",
+        "r": "# ",
+        "lua": "-- ",
+        "sql": "-- ",
+        "sqlite": "-- ",
         
         # C-style comments
-        ".js": "// ",
-        ".ts": "// ",
-        ".tsx": "// ",
-        ".jsx": "// ",
-        ".java": "// ",
-        ".go": "// ",
-        ".rs": "// ",
-        ".cpp": "// ",
-        ".c": "// ",
-        ".h": "// ",
-        ".hpp": "// ",
-        ".cs": "// ",
-        ".php": "// ",
-        ".swift": "// ",
-        ".kt": "// ",
-        ".scala": "// ",
-        ".m": "// ",
+        "js": "// ",
+        "ts": "// ",
+        "tsx": "// ",
+        "jsx": "// ",
+        "java": "// ",
+        "go": "// ",
+        "rs": "// ",
+        "cpp": "// ",
+        "c": "// ",
+        "h": "// ",
+        "hpp": "// ",
+        "cs": "// ",
+        "php": "// ",
+        "swift": "// ",
+        "kt": "// ",
+        "scala": "// ",
+        "m": "// ",
         
         # Multi-line comment openers
-        ".css": "/* ",
-        ".scss": "/* ",
-        ".sass": "/* ",
-        ".less": "/* ",
+        "css": "/* ",
+        "scss": "/* ",
+        "sass": "/* ",
+        "less": "/* ",
         
         # HTML/XML comments
-        ".html": "<!-- ",
-        ".xml": "<!-- ",
-        ".md": "<!-- ",
+        "html": "<!-- ",
+        "xml": "<!-- ",
+        "md": "<!-- ",
         
         # Special cases
-        ".bat": "REM ",
-        ".vim": "\" ",
-        ".el": "; ",
+        "bat": "REM ",
+        "vim": "\" ",
+        "el": "; ",
+        
+        # Extensionless or special files
+        "": "# ",  # Default for extensionless files (e.g., README, .gitignore)
+        "gitignore": "# ",
+        "dockerfile": "# ",
     }
     
     return comment_prefixes.get(ext, "# ")
