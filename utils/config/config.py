@@ -156,6 +156,7 @@ def get_comment_prefix(ext: str) -> str:
         "el": "; ",
         
         # Extensionless or special files
+        "json": "//",  
         "": "# ",  # Default for extensionless files (e.g., README, .gitignore)
         "gitignore": "# ",
         "dockerfile": "# ",
