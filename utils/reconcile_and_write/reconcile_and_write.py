@@ -10,6 +10,32 @@ from utils.normalize_path_segment.normalize_path_segment import normalize_path_s
 from utils.is_probably_file.is_probably_file import is_probably_file
 from utils.config.config import EXT_COMMENT_PLACEHOLDER, get_comment_prefix
 
+def get_cache_performance_stats(cache_manager: Optional[Any]) -> Dict[str, Any]:
+    """
+    Get cache performance statistics if cache manager is available.
+    
+    Args:
+        cache_manager: Cache manager instance
+        
+    Returns:
+        Dictionary with cache performance statistics
+    """
+    if not cache_manager:
+        return {}
+    
+    try:
+        stats = cache_manager.get_stats()
+        return {
+            'cache_hits': stats.get('hits', 0),
+            'cache_misses': stats.get('misses', 0),
+            'cache_loads': stats.get('loads', 0),
+            'cache_saves': stats.get('saves', 0),
+            'cache_hit_ratio': stats.get('hit_ratio', 0)
+        }
+    except Exception as e:
+        logging.debug(f"⚠️ Could not get cache performance stats: {e}")
+        return {}
+
 def should_ignore_entry(entry: str, ignore_patterns: List[str]) -> bool:
     """
     Check if an entry should be ignored based on patterns.
@@ -107,18 +133,43 @@ def count_content_lines(content: str) -> int:
         return 0
     return content.count("\n") + (1 if content and not content.endswith("\n") else 0)
 
-def should_update(file_path: Path, content: str, cache: Dict[str, str]) -> bool:
+def should_update(file_path: Path, content: str, cache: Dict[str, str], cache_manager: Optional[Any] = None) -> bool:
     """
-    Check if a file needs updating based on its content hash in the cache.
+    Check if a file needs updating using enhanced cache system.
     
     Args:
         file_path: Path to the file
         content: Proposed content to write
-        cache: Cache dictionary mapping file paths to content hashes
+        cache: Simple cache dictionary
+        cache_manager: Advanced cache manager for enhanced operations
         
     Returns:
         True if the file should be updated
     """
+    # Use cache_manager if available for advanced checks
+    if cache_manager:
+        try:
+            # Load file modification cache from manager
+            file_cache = cache_manager.load("file_modifications") or {}
+            file_key = str(file_path.relative_to(file_path.parent.parent) if file_path.is_relative_to(Path.cwd()) else file_path)
+            
+            if file_key in file_cache:
+                cached_data = file_cache[file_key]
+                current_hash = hashlib.md5(content.encode("utf-8")).hexdigest()
+                
+                # Check if file exists and matches cached state
+                if file_path.exists():
+                    file_stat = file_path.stat()
+                    if (cached_data.get('hash') == current_hash and 
+                        cached_data.get('modified') == file_stat.st_mtime and
+                        cached_data.get('size') == file_stat.st_size):
+                        return False
+                
+                return True
+        except Exception as e:
+            logging.debug(f"⚠️ Cache manager check failed, falling back to simple cache: {e}")
+    
+    # Fallback to simple cache logic
     if not cache:
         return True
     
@@ -133,17 +184,41 @@ def should_update(file_path: Path, content: str, cache: Dict[str, str]) -> bool:
     
     return False
 
-def update_cache(file_path: Path, content: str, cache: Dict[str, str]) -> None:
+def update_cache(file_path: Path, content: str, cache: Dict[str, str], cache_manager: Optional[Any] = None) -> None:
     """
-    Update the cache with the new content hash for a file.
+    Update cache with enhanced capabilities using cache manager.
     
     Args:
         file_path: Path to the file
         content: Content written to the file
-        cache: Cache dictionary to update
+        cache: Simple cache dictionary
+        cache_manager: Advanced cache manager
     """
     content_hash = hashlib.md5(content.encode("utf-8")).hexdigest()
+    
+    # Update simple cache
     cache[str(file_path)] = content_hash
+    
+    # Update advanced cache if available
+    if cache_manager and file_path.exists():
+        try:
+            file_stat = file_path.stat()
+            file_key = str(file_path.relative_to(file_path.parent.parent) if file_path.is_relative_to(Path.cwd()) else file_path)
+            
+            # Load existing cache or create new
+            file_cache = cache_manager.load("file_modifications") or {}
+            file_cache[file_key] = {
+                'hash': content_hash,
+                'modified': file_stat.st_mtime,
+                'size': file_stat.st_size,
+                'path': str(file_path)
+            }
+            
+            # Save updated cache
+            cache_manager.save("file_modifications", file_cache)
+            
+        except Exception as e:
+            logging.debug(f"⚠️ Failed to update advanced cache: {e}")
 
 def process_file_entry(
     entry: str,
@@ -157,7 +232,8 @@ def process_file_entry(
     files_always: Set,
     dirs_always: Set,
     warnings: List[str],
-    cache: Dict[str, str]
+    cache: Dict[str, str],
+    cache_manager: Optional[Any] = None  # Add cache_manager parameter
 ) -> Tuple[Optional[str], int, int, int]:
     """
     Process a single file entry for writing.
@@ -211,14 +287,14 @@ def process_file_entry(
     if not dry_run:
         if no_overwrite and file_path.exists():
             warnings.append(f"ℹ️ Skipped writing {file_path} due to --no-overwrite")
-        elif cache and not should_update(file_path, content_with_heading, cache):
+        elif cache and not should_update(file_path, content_with_heading, cache, cache_manager):
             warnings.append(f"ℹ️ Skipped unchanged file {file_path}")
         else:
             written = safe_write_text(file_path, content_with_heading, warnings, no_overwrite=no_overwrite)
             if written:
                 files_written = 1
                 if cache:
-                    update_cache(file_path, content_with_heading, cache)
+                    update_cache(file_path, content_with_heading, cache, cache_manager)
     
     return str(file_path), lines_written, int(is_placeholder), files_written
 
@@ -270,7 +346,8 @@ def reconcile_and_write(
     dirs_always: Optional[Set] = None,
     no_overwrite: bool = False,
     heading_map: Dict[str, str] = {},
-    cache: Optional[Dict[str, str]] = None
+    cache: Optional[Dict[str, str]] = None,
+    cache_manager: Optional[Any] = None  # Add cache_manager parameter
 ) -> Tuple[Set, List[str], List[str], int, int, int]:
     """
     Reconcile tree entries with code map and write files to disk.
@@ -310,6 +387,13 @@ def reconcile_and_write(
     files_always = files_always or set()
     dirs_always = dirs_always or set()
     cache = cache or {}
+
+    if cache_manager and verbose:
+        try:
+            cache_stats = cache_manager.get_stats()
+            logging.debug(f"🔍 Cache manager initialized: {cache_stats}")
+        except Exception as e:
+            logging.debug(f"⚠️ Could not get cache manager stats: {e}")
     
     if not tree_entries:
         warnings.append("⚠️ No tree entries provided")
@@ -338,7 +422,8 @@ def reconcile_and_write(
                 file_path, lines, placeholder_flag, written_flag = process_file_entry(
                     entry_clean, out_root, code_map, heading_map,
                     dry_run, verbose, skip_empty, no_overwrite,
-                    files_always, dirs_always, warnings, cache
+                    files_always, dirs_always, warnings, cache,
+                    cache_manager  # Pass cache_manager
                 )
                 
                 if file_path:
@@ -410,7 +495,8 @@ def debug_reconciliation(
     created_dirs, created_files, warnings, lines, placeholders, written = reconcile_and_write(
         tree_entries, code_map, out_root,
         dry_run=True, verbose=False,
-        files_always=files_always, dirs_always=dirs_always
+        files_always=files_always, dirs_always=dirs_always,
+        cache_manager=None  # No cache manager for debug runs
     )
     
     debug_info["reconciliation_stats"] = {

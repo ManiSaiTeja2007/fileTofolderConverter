@@ -34,12 +34,17 @@ from utils.write_extension_report.write_extension_report import write_extension_
 from utils.resolve_conflict_interactive.resolve_conflict_interactive import resolve_conflict_interactive, resolve_conflict_batch
 from utils.write_html_report.write_html_report import write_html_report
 from utils.is_probably_file.is_probably_file import is_probably_file
-from utils.cache.cache import load_cache, save_cache
+from utils.cache import CacheManager, generate_cache_key, get_cache_info
 from utils.set_executable.set_executable import set_executable
 from utils.folder_to_markdown.folder_to_markdown import folder_to_markdown
 from utils.validate_entry_path.validate_entry_path import validate_entry_path
 
 def main():
+    
+    start_time = time.time()
+    cache_hits = 0
+    cache_misses = 0
+
     parser = argparse.ArgumentParser(
         description="Generate project folder from Markdown spec or convert folder to Markdown",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
@@ -75,6 +80,10 @@ def main():
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--fallback-level", choices=["low", "medium", "high"], default="low", help="Fallback level for unassigned blocks")
     parser.add_argument("--conflict-strategy", choices=["first", "longest", "shortest", "most_specific", "skip"], default="first", help="Batch conflict resolution strategy")
+    parser.add_argument("--cache-debug", action="store_true", help="Debug cache operations")
+    parser.add_argument("--cache-size", type=int, default=50, help="Cache size in MB (default: 50)")
+    parser.add_argument("--no-mmap", action="store_true", help="Disable memory mapping for cache files")
+    parser.add_argument("--fast-json", action="store_true", help="Use ultra-fast JSON parsing (requires ujson)")
 
     args = parser.parse_args()
 
@@ -118,7 +127,10 @@ def main():
         args.tar = merge_flag("tar", args.tar, bool)
         args.no_overwrite = merge_flag("no_overwrite", args.no_overwrite, bool)
         args.conflict_strategy = merge_flag("conflict_strategy", args.conflict_strategy)
-
+        args.cache_size = merge_flag("cache_size", args.cache_size, int)
+        args.no_mmap = merge_flag("no_mmap", args.no_mmap, bool)
+        args.fast_json = merge_flag("fast_json", args.fast_json, bool)
+        
         # Handle folder-to-md mode
         if args.folder_to_md:
             folder = Path(args.input)
@@ -308,22 +320,38 @@ def main():
                 logging.error(f"❌ Failed to remove existing output directory {out_root}: {e}")
                 sys.exit(1)
 
-        # Incremental mode
-        cache = {}
-        if args.incremental:
-            cache_file = out_root / ".generator_cache.json"
-            try:
-                cache = load_cache(cache_file)
-            except FileNotFoundError:
-                logging.info("ℹ️ No cache file found, creating new cache.")
-            except Exception as e:
-                logging.warning(f"⚠️ Failed to load cache: {e}. Regenerating all files.")
+        # Enhanced incremental mode with performance cache
+        # Enhanced incremental mode with performance cache
+        cache_manager = None
+        file_cache = {}
 
+        if args.incremental:
+            try:
+                cache_manager = CacheManager(
+                    cache_dir=out_root / ".generator_cache",
+                    max_size_mb=args.cache_size,
+                    use_mmap=not args.no_mmap,
+                    auto_create_dirs=True
+                )
+                
+                # Load file modification cache
+                file_cache = cache_manager.load("file_modifications") or {}
+                
+                if args.verbose:
+                    cache_info = cache_manager.get_info("file_modifications")
+                    logging.info(f"ℹ️ Cache loaded: {cache_info.get('entry_count', 0)} entries, {cache_info.get('size_bytes', 0)} bytes")
+                    
+            except Exception as e:
+                logging.warning(f"⚠️ Failed to initialize cache: {e}. Continuing without cache.")
+                file_cache = {}
+        else:
+            file_cache = {}
         created_dirs, created_files, write_warnings, total_lines_written, placeholders_created, files_written_count = reconcile_and_write(
             tree_entries, code_map, out_root,
             dry_run=args.dry, verbose=args.verbose, skip_empty=args.skip_empty,
             ignore_patterns=args.ignore, files_always=files_always, dirs_always=dirs_always,
-            no_overwrite=args.no_overwrite, heading_map=heading_map, cache=cache
+            no_overwrite=args.no_overwrite, heading_map=heading_map, cache=file_cache,
+            cache_manager=cache_manager  # Pass the cache manager for advanced operations
         )
 
         if unassigned and not args.dry:
@@ -404,14 +432,28 @@ def main():
             except Exception as e:
                 logging.warning(f"⚠️ Failed to create tar.gz archive: {e}")
 
-        if args.incremental:
-            cache_file = out_root / ".generator_cache.json"
+        if args.incremental and cache_manager:
             try:
-                from utils.cache.cache import cleanup_stale_cache_entries
-                cleanup_stale_cache_entries(cache, [out_root / f for f in created_files])
-                save_cache(cache_file, cache)
+                # Update cache with current file modifications
+                cache_data = {}
+                for file_path in created_files:
+                    full_path = out_root / file_path
+                    if full_path.exists():
+                        cache_data[file_path] = {
+                            'modified': full_path.stat().st_mtime,
+                            'size': full_path.stat().st_size,
+                            'hash': generate_cache_key(full_path.read_text(encoding='utf-8'))
+                        }
+                
+                # Save updated cache
+                cache_manager.save("file_modifications", cache_data)
+                
+                # Log cache statistics
+                cache_stats = cache_manager.get_stats()
+                logging.debug(f"ℹ️ Cache stats: {cache_stats}")
+                
             except Exception as e:
-                logging.warning(f"⚠️ Failed to handle cache: {e}. Regenerating all files next time.")
+                logging.warning(f"⚠️ Failed to update cache: {e}")
 
         if args.set_exec:
             for f in created_files:
@@ -434,16 +476,46 @@ def main():
             logging.error("❌ Strict mode: Exiting due to issues or unassigned blocks")
             sys.exit(1)
 
+        # Cache debugging
+        if args.cache_debug and cache_manager:
+            try:
+                cache_info = cache_manager.debug("file_modifications")
+                logging.info(f"🔍 Cache debug info: {cache_info}")
+                
+                # Also debug the main cache file
+                cache_file_info = get_cache_info(out_root / ".generator_cache" / "file_modifications.json")
+                logging.info(f"🔍 Cache file info: {cache_file_info}")
+            except Exception as e:
+                logging.warning(f"⚠️ Cache debugging failed: {e}")
+        
+        # After file generation, add cache statistics
+        if args.incremental and cache_manager:
+            stats = cache_manager.get_stats()
+            cache_hits = stats.get('hits', 0)
+            cache_misses = stats.get('misses', 0)
+            if cache_hits + cache_misses > 0:
+                hit_ratio = cache_hits / (cache_hits + cache_misses)
+                logging.info(f"ℹ️ Cache performance: {cache_hits} hits, {cache_misses} misses ({hit_ratio:.1%} hit ratio)")
+
         # Final console summary
         if level <= logging.INFO:
             logging.info("\n---- Final Report ----")
             for k, v in sorted(summary.items()):
                 logging.info(f"{k}: {v}")
+            
+            # Add cache statistics if available
+            if args.incremental and cache_manager:
+                cache_stats = cache_manager.get_stats()
+                logging.info(f"cache_hits: {cache_stats.get('hits', 0)}")
+                logging.info(f"cache_misses: {cache_stats.get('misses', 0)}")
+                if cache_stats.get('hits', 0) + cache_stats.get('misses', 0) > 0:
+                    hit_ratio = cache_stats['hits'] / (cache_stats['hits'] + cache_stats['misses'])
+                    logging.info(f"cache_hit_ratio: {hit_ratio:.1%}")
+            
             if summary["unassigned_blocks"]:
                 logging.warning(f"⚠️ {summary['unassigned_blocks']} unassigned block(s) saved in UNASSIGNED/")
             elif not summary["issues"]:
                 logging.info("✅ All files created and verified successfully")
-
     except Exception as e:
         logging.error(f"❌ Unexpected error: {e}\n{traceback.format_exc()}")
         sys.exit(1)
