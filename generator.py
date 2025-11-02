@@ -488,14 +488,12 @@ def main():
             except Exception as e:
                 logging.warning(f"⚠️ Cache debugging failed: {e}")
         
-        # After file generation, add cache statistics
-        if args.incremental and cache_manager:
-            stats = cache_manager.get_stats()
-            cache_hits = stats.get('hits', 0)
-            cache_misses = stats.get('misses', 0)
-            if cache_hits + cache_misses > 0:
-                hit_ratio = cache_hits / (cache_hits + cache_misses)
-                logging.info(f"ℹ️ Cache performance: {cache_hits} hits, {cache_misses} misses ({hit_ratio:.1%} hit ratio)")
+            # Cache performance statistics
+            if args.incremental and cache_manager:
+                from utils.reconcile_and_write.reconcile_and_write import get_cache_performance_stats
+                cache_stats = get_cache_performance_stats(cache_manager)
+                if cache_stats:
+                    logging.info(f"ℹ️ Cache performance: {cache_stats['cache_hits']} hits, {cache_stats['cache_misses']} misses ({cache_stats['cache_hit_ratio']:.1%} hit ratio)")
 
         # Final console summary
         if level <= logging.INFO:

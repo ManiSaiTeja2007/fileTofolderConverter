@@ -35,7 +35,7 @@ def get_path_specificity(path: str) -> int:
     except Exception:
         return 0
 
-def extract_hint_from_content(content: str) -> Tuple[str, str]:
+def extract_hint_from_content(content: str) -> Tuple[str, str, bool]:
     """
     Extract hint from first line of content and return remaining body.
     
@@ -43,75 +43,94 @@ def extract_hint_from_content(content: str) -> Tuple[str, str]:
         content: Code block content
         
     Returns:
-        Tuple of (hint, body)
+        Tuple of (hint, body, has_hint)
     """
     if not content:
-        return "", ""
+        return "", "", False
     
     lines = content.splitlines()
     if not lines:
-        return "", content
+        return "", content, False
     
     first_line = lines[0].strip()
     hint = ""
     body = content
+    has_hint = False
     
-    # Check for comment-style hints
-    if first_line.startswith(("#", "//")):
-        hint = re.sub(r"^(\s*//\s*|\s*#\s*)", "", first_line).strip().lstrip("./").replace('\\', '/')
-        body = "\n".join(lines[1:]).rstrip()
+    # All possible comment patterns from your config
+    comment_patterns = [
+        r"^\s*#\s*(.*)$",           # Python, shell, etc
+        r"^\s*//\s*(.*)$",          # JavaScript, Java, etc  
+        r"^\s*--\s*(.*)$",          # SQL, Haskell, etc
+        r"^\s*<!--\s*(.*?)\s*-->$", # HTML/XML
+        r"^\s*%\s*(.*)$",           # LaTeX
+        r"^\s*\*\s*(.*)$",          # Some languages
+        r"^\s*REM\s*(.*)$",         # Batch files
+        r'^\s*"\s*(.*)$',           # Vim script
+        r"^\s*;\s*(.*)$",           # Lisp, Assembly
+    ]
     
-    return hint, body
+    for pattern in comment_patterns:
+        match = re.match(pattern, first_line)
+        if match:
+            hint = match.group(1).strip().lstrip("./").replace('\\', '/')
+            body = "\n".join(lines[1:]).rstrip()
+            has_hint = True
+            break
+    
+    return hint, body, has_hint
 
 def process_hint_replacement(
     existing_hint: str, 
     target_file: str, 
     original_content: str, 
-    strip_hints: bool
+    strip_hints: bool,
+    has_existing_hint: bool
 ) -> Tuple[str, bool]:
     """
-    Process hint replacement logic based on specificity and strip settings.
+    Simple hint replacement: strip first line if it's a hint, replace with best hint.
     
     Args:
-        existing_hint: Current hint in content
-        target_file: Target file path
+        existing_hint: Current hint in content (unused in this simplified version)
+        target_file: Target file path  
         original_content: Original code block content
         strip_hints: Whether to strip hints
+        has_existing_hint: Whether content already has a hint
         
     Returns:
         Tuple of (processed_content, was_replaced)
     """
-    if not existing_hint:
-        return original_content, False
+    lines = original_content.splitlines()
     
-    existing_specificity = get_path_specificity(existing_hint)
-    target_specificity = get_path_specificity(target_file)
+    # If we should strip hints and there's an existing hint, remove the first line
+    if strip_hints and has_existing_hint:
+        body = "\n".join(lines[1:]).rstrip() if len(lines) > 1 else ""
+        return body, True
     
-    if are_hints_similar(existing_hint, target_file):
-        if existing_specificity >= target_specificity:
-            # Existing hint is as or more specific; keep original
-            return original_content, False
-        else:
-            # New hint is more specific; replace
-            lines = original_content.splitlines()
-            body = "\n".join(lines[1:]).rstrip() if len(lines) > 1 else ""
-            if strip_hints:
-                return body, True
-            else:
-                # Get file extension and appropriate comment prefix
-                try:
-                    file_extension = Path(target_file).suffix.lstrip('.')
-                    comment_prefix = get_comment_prefix(file_extension or Path(target_file).name.lower())
-                except Exception as e:
-                    logging.warning(f"⚠️ Failed to get comment prefix for '{target_file}': {e}")
-                    comment_prefix = "# "  # Fallback
-                # Strip existing hint and add new hint with dynamic comment prefix
-                return f"{comment_prefix}{target_file}\n{body}", True
-    elif strip_hints:
-        # Strip hint even if not similar
-        lines = original_content.splitlines()
-        return "\n".join(lines[1:]).rstrip(), True
+    # If there's an existing hint, always replace it with the target file
+    if has_existing_hint:
+        body = "\n".join(lines[1:]).rstrip() if len(lines) > 1 else ""
+        try:
+            file_extension = Path(target_file).suffix.lstrip('.')
+            comment_prefix = get_comment_prefix(file_extension or Path(target_file).name.lower())
+        except Exception as e:
+            logging.warning(f"⚠️ Failed to get comment prefix for '{target_file}': {e}")
+            comment_prefix = "# "  # Fallback
+        
+        return f"{comment_prefix}{target_file}\n{body}", True
     
+    # If no existing hint and we shouldn't strip, add the target file as hint
+    if not strip_hints:
+        try:
+            file_extension = Path(target_file).suffix.lstrip('.')
+            comment_prefix = get_comment_prefix(file_extension or Path(target_file).name.lower())
+        except Exception as e:
+            logging.warning(f"⚠️ Failed to get comment prefix for '{target_file}': {e}")
+            comment_prefix = "# "  # Fallback
+        
+        return f"{comment_prefix}{target_file}\n{original_content}", True
+    
+    # Default: return original content unchanged
     return original_content, False
 
 def build_basename_lookup(code_map: Dict[str, List[str]]) -> Dict[str, List[str]]:
@@ -222,19 +241,27 @@ def handle_fence_with_current_file(
     if current_file not in code_map:
         return False
     
-    hint, body = extract_hint_from_content(fence_content)
+    hint, body, has_hint = extract_hint_from_content(fence_content)
     processed_content, was_replaced = process_hint_replacement(
-        hint, current_file, fence_content, strip_hints
+        hint, current_file, fence_content, strip_hints, has_hint
     )
     
     if was_replaced:
-        warnings.append(f"ℹ️ Replaced hint '{hint}' with '{current_file}' (more specific)")
+        if strip_hints:
+            warnings.append(f"ℹ️ Stripped hint '{hint}' from code block")
+        else:
+            warnings.append(f"ℹ️ Replaced hint '{hint}' with '{current_file}' (more specific)")
     
     if processed_content:
-        # Check for duplicate content
-        if (code_map[current_file] and 
-            are_hints_similar(code_map[current_file][-1].splitlines()[0], current_file)):
-            warnings.append(f"⚠️ File {current_file} had multiple code blocks merged")
+        # Check if the last block already has the same hint to avoid duplicates
+        existing_blocks = code_map[current_file]
+        if existing_blocks:
+            last_block = existing_blocks[-1]
+            last_hint, _, last_has_hint = extract_hint_from_content(last_block)
+            if (last_has_hint and has_hint and 
+                are_hints_similar(last_hint, hint) and 
+                not strip_hints):
+                warnings.append(f"⚠️ File {current_file} had multiple code blocks with similar hints")
         
         code_map[current_file].append(processed_content)
     
@@ -329,17 +356,27 @@ def assign_fence_to_target(
     if target not in code_map:
         return False
     
-    hint, body = extract_hint_from_content(fence_content)
+    hint, body, has_hint = extract_hint_from_content(fence_content)
     processed_content, was_replaced = process_hint_replacement(
-        hint, target, fence_content, strip_hints
+        hint, target, fence_content, strip_hints, has_hint
     )
     
     if was_replaced:
-        warnings.append(f"ℹ️ Replaced hint '{hint}' with '{target}' (more specific)")
+        if strip_hints:
+            warnings.append(f"ℹ️ Stripped hint '{hint}' from code block")
+        else:
+            warnings.append(f"ℹ️ Replaced hint '{hint}' with '{target}' (more specific)")
     
     if processed_content:
-        if code_map[target] and are_hints_similar(code_map[target][-1].splitlines()[0], target):
-            warnings.append(f"⚠️ File {target} had multiple code blocks merged")
+        # Check if the last block already has the same hint to avoid duplicates
+        existing_blocks = code_map[target]
+        if existing_blocks:
+            last_block = existing_blocks[-1]
+            last_hint, _, last_has_hint = extract_hint_from_content(last_block)
+            if (last_has_hint and has_hint and 
+                are_hints_similar(last_hint, hint) and 
+                not strip_hints):
+                warnings.append(f"⚠️ File {target} had multiple code blocks with similar hints")
         
         code_map[target].append(processed_content)
         heading_map[target] = source_info
@@ -459,7 +496,7 @@ def map_headings_to_files(
                     continue
                 
                 # Try hint in first line
-                hint, body = extract_hint_from_content(fence_content)
+                hint, body, has_hint = extract_hint_from_content(fence_content)
                 if hint:
                     candidates = [f for f in code_map.keys() if f.endswith(hint) or hint in f]
                     if len(candidates) == 1:
@@ -497,8 +534,9 @@ def map_headings_to_files(
                 inline = tokens[i + 1] if (i + 1) < n else None
                 para_text = inline.content.strip() if inline and inline.type == "inline" else ""
                 if para_text:
+                    hint, _, has_hint = extract_hint_from_content(code_map[current_file][-1]) if code_map[current_file] else ("", "", False)
                     if (code_map[current_file] and 
-                        are_hints_similar(code_map[current_file][-1].splitlines()[0], current_file)):
+                        are_hints_similar(hint, current_file)):
                         warnings.append(f"⚠️ File {current_file} had multiple code blocks merged")
                     code_map[current_file].append(para_text)
                 
