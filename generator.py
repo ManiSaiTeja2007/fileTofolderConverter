@@ -19,9 +19,22 @@ from pathlib import Path
 import difflib
 import traceback
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
-from utils.config.config import load_config_file, merge_placeholders_from_file
+# Instead of importing all the individual functions and constants
+# Just use:
+from utils.config import (
+    EXT_COMMENT_PLACEHOLDER,
+    SPECIAL_FILES,
+    get_comment_prefix,
+    get_comment_suffix,
+    get_default_placeholder,
+    load_config_file,
+    find_config_candidates,
+    merge_placeholders_from_file,
+    is_special_file,
+    debug_config_loading
+)
 from utils.load_markdown.load_markdown import load_markdown
 from utils.extract_file_structure_block.extract_file_structure_block import extract_file_structure_block
 from utils.parse_ascii_tree_block.parse_ascii_tree_block import parse_ascii_tree_block
