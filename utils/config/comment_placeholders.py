@@ -54,6 +54,7 @@ EXT_COMMENT_PLACEHOLDER: Dict[str, str] = {
     ".sql": "-- TODO: implement\n",
     ".sqlite": "-- TODO: implement\n",
     
+    ".m":"% TODO: implement\n",
     "default": "# TODO: implement\n",
 }
 

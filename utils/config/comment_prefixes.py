@@ -50,7 +50,7 @@ def get_comment_prefix(ext: str) -> str:
         "swift": "// ",
         "kt": "// ",
         "scala": "// ",
-        "m": "// ",
+        "m": "% ",
         
         # Multi-line comment openers
         "css": "/* ",
