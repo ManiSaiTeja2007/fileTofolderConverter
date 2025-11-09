@@ -6,8 +6,7 @@ import fnmatch
 import logging
 from functools import lru_cache
 
-from ...constants import DEFAULT_IGNORE_PATTERNS
-from ...constants import DEFAULT_IGNORE_PATTERNS, EXPLICIT_IGNORE_DIRS  # NEW: Import both
+from ...constants import DEFAULT_IGNORE_PATTERNS, EXPLICIT_IGNORE_DIRS  
 
 @lru_cache(maxsize=1024)
 
