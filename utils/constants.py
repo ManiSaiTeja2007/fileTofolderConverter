@@ -44,6 +44,7 @@ DEFAULT_IGNORE_PATTERNS = [
     ".gitignore",
     ".gitattributes",
     ".gitkeep",
+    "LICENSE",
     
     # OS
     ".DS_Store",

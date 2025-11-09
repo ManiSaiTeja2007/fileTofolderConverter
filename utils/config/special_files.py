@@ -1,5 +1,5 @@
 from typing import Set
-
+from utils.constants import DEFAULT_IGNORE_PATTERNS
 # File detection + special cases with better categorization
 SPECIAL_FILES: Set[str] = {
     # Build and dependency files
@@ -39,6 +39,8 @@ def is_special_file(filename: str) -> bool:
         return False
     
     name_lower = filename.lower().strip()
+    if name_lower in DEFAULT_IGNORE_PATTERNS:
+        return False
     
     # Exact matches
     if name_lower in SPECIAL_FILES:
