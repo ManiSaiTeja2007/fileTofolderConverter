@@ -78,7 +78,7 @@ def main():
     parser.add_argument("--dirs-always", nargs="*", default=[], help="Names to always treat as dirs")
     parser.add_argument("--placeholders", metavar="FILE", help="JSON file with placeholder overrides")
     parser.add_argument("--config", metavar="FILE", help="Path to generator.config.json to load defaults")
-    parser.add_argument("--strip-hints", action="store_true", help="Strip first-line hint comments from rescued content")
+    parser.add_argument("--add-hints", action="store_true", help="Add first-line hint comments to rescued content (disables strip mode)")
     parser.add_argument("--zip", action="store_true", help="Zip the output folder after generation")
     parser.add_argument("--tar", action="store_true", help="Tar.gz the output folder after generation")
     parser.add_argument("--interactive", action="store_true", help="Prompt user when conflicts occur")
@@ -135,7 +135,8 @@ def main():
         args.files_always = merge_flag("files_always", args.files_always, list)
         args.dirs_always = merge_flag("dirs_always", args.dirs_always, list)
         args.placeholders = merge_flag("placeholders", args.placeholders)
-        args.strip_hints = merge_flag("strip_hints", args.strip_hints, bool)
+        args.add_hints = merge_flag("add_hints", args.add_hints, bool)
+        args.strip_hints = not args.add_hints
         args.zip = merge_flag("zip", args.zip, bool)
         args.tar = merge_flag("tar", args.tar, bool)
         args.no_overwrite = merge_flag("no_overwrite", args.no_overwrite, bool)
