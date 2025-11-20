@@ -51,6 +51,7 @@ def get_comment_prefix(ext: str) -> str:
         "kt": "// ",
         "scala": "// ",
         "m": "% ",
+        "ino": "// ",
         
         # Multi-line comment openers
         "css": "/* ",
