@@ -202,5 +202,5 @@ LANGUAGE_EXTENSIONS = {
 BINARY_EXTENSIONS = {
     '.ico', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', 
     '.webp', '.svg', '.pdf', '.zip', '.tar', '.gz', '.7z',
-    '.exe', '.dll', '.so', '.dylib', '.woff', '.woff2', '.ttf', '.eot'
+    '.exe', '.dll', '.so', '.dylib', '.woff', '.woff2', '.ttf', '.eot', '.docx'
 }
