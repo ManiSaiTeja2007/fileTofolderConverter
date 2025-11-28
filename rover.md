@@ -1,19 +1,19 @@
 # Generated Folder Structure
 *Generated from: `D:\ES_Project\AutonomousRoverSwarm\rover`*
-*Timestamp: 2025-11-20T21:12:49.694485*
+*Timestamp: 2025-11-20T21:16:43.063992*
 
 ## File Structure
 ```text
 rover/
-├── rover_esp8266_spi_master/
-│   ├── rover_esp8266_spi_master.ino
+├── rover_esp8266/
+│   ├── rover_esp8266.ino
 │   ├── sha256.c
 │   └── sha256.h
-└── rover_uno_spi_slave/
-    └── rover_uno_spi_slave.ino
+└── rover_uno/
+    └── rover_uno.ino
 ```
 
-## rover_esp8266_spi_master/rover_esp8266_spi_master.ino
+## rover_esp8266/rover_esp8266.ino
 ```text
 /**
  * ESP8266 UART Master - Production Ready Rover Controller
@@ -1120,7 +1120,7 @@ void processBackendMessages() {
 }
 ```
 
-## rover_esp8266_spi_master/sha256.c
+## rover_esp8266/sha256.c
 ```c
 #include "sha256.h"
 #include <string.h>
@@ -1281,7 +1281,7 @@ void sha256(const uint8_t *message, size_t len, uint8_t *digest)
 }
 ```
 
-## rover_esp8266_spi_master/sha256.h
+## rover_esp8266/sha256.h
 ```c
 #ifndef SHA256_H
 #define SHA256_H
@@ -1313,7 +1313,7 @@ void sha256(const uint8_t *message, size_t len, uint8_t *digest);
 #endif
 ```
 
-## rover_uno_spi_slave/rover_uno_spi_slave.ino
+## rover_uno/rover_uno.ino
 ```text
 /**
  * UNO UART Controller - Enhanced Rover Control with Correct Pin Mapping
