@@ -203,5 +203,6 @@ BINARY_EXTENSIONS = {
     '.ico', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', 
     '.webp', '.svg', '.pdf', '.zip', '.tar', '.gz', '.7z',
     '.exe', '.dll', '.so', '.dylib', '.woff', '.woff2', '.ttf', '.eot', '.docx', '.xlsx', '.pptx', '.mat',
-    '.slx', '.mp4', '.mp3', '.avi', '.mov', '.wmv', '.flv', '.mkv', '.1', '.fbx', '.unity', '.prefab'
+    '.slx', '.mp4', '.mp3', '.avi', '.mov', '.wmv', '.flv', '.mkv', '.1', '.fbx', '.unity', '.prefab',
+    '.csv', 
 }
